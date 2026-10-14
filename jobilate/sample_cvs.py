@@ -1,0 +1,90 @@
+"""SAMPLE CVs for demo / tests. Clearly SAMPLE data — no real people,
+no real phone numbers (placeholder +000... numbers only)."""
+from __future__ import annotations
+
+SAMPLE_CVS: list[dict] = [
+    {
+        "name": "Sample Adaeze O.",
+        "phone": "+0000000001",
+        "title": "Sales Supervisor — Agro-Pharmaceuticals",
+        "job_type": "Full-Time",
+        "employment_status": "Employed",
+        "education": "B.Tech Animal Production and Health",
+        "highest_qualification": "B.Tech Animal Production and Health",
+        "skills": "Vet drug sales, feed miller relations, commercial farm accounts, team leadership, travel",
+        "languages": "English, Yoruba",
+        "certifications": "Animal Health Technology certificate",
+        "experience_text": "6 years agro-pharma sales (vet drugs) with feed millers, commercial farms, agro-dealers and distributors. Leads a team of 4.",
+        "experience_years": 6.0,
+        "expected_salary": "₦400,000/month",
+        "expected_salary_min": 400000,
+        "location": "Lagos State",
+        "cv_url": "https://jiji.ng/sample-cv-1",
+        "source": "jiji",
+    },
+    {
+        "name": "Sample Chinedu E.",
+        "phone": "+0000000002",
+        "title": "Sales Representative — Veterinary Products",
+        "job_type": "Full-Time",
+        "employment_status": "Employed",
+        "education": "B.Sc Animal Health Technology",
+        "highest_qualification": "B.Sc Animal Health Technology",
+        "skills": "Vet drug sales, distributor management, farm visits",
+        "languages": "English, Igbo",
+        "certifications": "",
+        "experience_text": "5 years selling veterinary drugs to agro-dealers and farms.",
+        "experience_years": 5.0,
+        "expected_salary": "₦350,000/month",
+        "expected_salary_min": 350000,
+        "location": "Ogun State",
+        "cv_url": "https://jiji.ng/sample-cv-2",
+        "source": "jiji",
+    },
+    {
+        "name": "Sample Fatima B.",
+        "phone": "+0000000003",
+        "title": "Marketing Executive",
+        "job_type": "Full-Time",
+        "employment_status": "Unemployed",
+        "education": "HND Marketing",
+        "highest_qualification": "HND Marketing",
+        "skills": "Marketing, promotions, client visits, team coordination",
+        "languages": "English, Hausa",
+        "certifications": "",
+        "experience_text": "3 years marketing, some agro product promotion.",
+        "experience_years": 3.0,
+        "expected_salary": "₦250,000/month",
+        "expected_salary_min": 250000,
+        "location": "Lagos State",
+        "cv_url": "https://jiji.ng/sample-cv-3",
+        "source": "jiji",
+    },
+    {
+        "name": "Sample Grace K.",
+        "phone": "+0000000004",
+        "title": "Farm Worker",
+        "job_type": "Full-Time",
+        "employment_status": "Employed",
+        "education": "",
+        "highest_qualification": "",
+        "skills": "Poultry care, feeding, farm work",
+        "languages": "English",
+        "certifications": "",
+        "experience_text": "Worked on a poultry farm, duties unclear.",
+        "experience_years": None,
+        "expected_salary": "",
+        "expected_salary_min": None,
+        "location": "Lagos State",
+        "cv_url": "https://jiji.ng/sample-cv-4",
+        "source": "jiji",
+    },
+]
+
+SAMPLE_VACANCY_TEXT = """Role: Sales Supervisor
+Location: Lagos State
+Pay: ₦500,000+/month
+Job Type: Full-Time
+Requirements: B.Tech/B.Agric/HND Animal Production and Health or B.Sc Animal Health Technology, 5+ years agro-pharma sales (vet drugs), connections with feed millers/commercial farms/agro-dealers/distributors, team leadership, willing to travel.
+Employer: Agro-Pharmaceuticals company
+"""
