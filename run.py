@@ -16,6 +16,43 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from jobilate.config import Config
+
+
+def load_dotenv(path: str | None = None) -> int:
+    """Load .env (stdlib-only, no python-dotenv dependency).
+
+    Reads key=value lines from the .env file next to this file (not
+    cwd-dependent), so `python run.py` picks up BOT_TOKEN /
+    ADMIN_CHAT_ID edited in Notepad. Real env vars already set in the
+    session win over .env (setdefault). Missing .env -> no-op, no crash.
+    Malformed lines -> skipped, no crash. CRLF (Windows Notepad) handled.
+    """
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(path):
+        return 0
+    loaded = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                line = raw.strip().strip("\r\n")
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                if not key:
+                    continue
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+                if key not in os.environ:
+                    os.environ[key] = value
+                    loaded += 1
+    except OSError:
+        return 0
+    return loaded
 from jobilate.dedup import dedup_candidates
 from jobilate.matching import score_candidate
 from jobilate.models import Candidate, Vacancy
@@ -66,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--once-vacancy-file", metavar="PATH")
     args = ap.parse_args(argv)
+    load_dotenv()
     cfg = Config.from_env()
     if args.dry_run:
         print("Jobilate recruiter bot — dry run")

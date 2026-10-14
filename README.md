@@ -27,6 +27,10 @@ python run.py --dry-run
 python run.py   # starts polling
 ```
 
+`run.py` loads `.env` automatically (from the folder `run.py` lives in) —
+you do NOT need to set env vars in PowerShell. Real env vars already set
+in the session win over `.env`.
+
 Demo without Telegram:
 
 ```bash
@@ -69,6 +73,8 @@ See `/help` in the bot, or `SPEC.md`. Highlights:
    It creates `.venv`, installs requirements, copies `.env.example` → `.env`
    if missing, then runs `python run.py`.
 4. Edit `.env` with the bot token + recruiter chat id, re-run the script.
+   `run.py` loads `.env` automatically — you do NOT need to set env vars
+   in PowerShell.
 5. Keep the window open (or run under a scheduled task) — polling needs the process alive.
 
 ## Termux note
