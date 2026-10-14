@@ -664,10 +664,32 @@ class JobilateBot:
         await q.edit_message_text("Unknown button.")
 
     def build_application(self):
-        from telegram import Update
+        from telegram import BotCommand, Update
         from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, ConversationHandler, MessageHandler, filters
 
-        app = ApplicationBuilder().token(self.config.bot_token).build()
+        async def post_init(app):
+            # Commands menu she sees when she types "/" or taps the menu button.
+            # Kept to the 16 she actually needs — the rest still work by typing.
+            await app.bot.set_my_commands([
+                BotCommand("start", "Start the bot"),
+                BotCommand("help", "Show all commands"),
+                BotCommand("newvacancy", "Add a new vacancy"),
+                BotCommand("vacancies", "List your vacancies"),
+                BotCommand("candidates", "List candidates"),
+                BotCommand("harvest", "Get new candidates + CSV"),
+                BotCommand("dump", "Get everything + CSV"),
+                BotCommand("todo", "Today's to-do + follow-ups"),
+                BotCommand("export", "Get CSV file"),
+                BotCommand("template", "Show message to copy"),
+                BotCommand("mark", "Mark a candidate"),
+                BotCommand("pause", "Pause a vacancy"),
+                BotCommand("resume", "Resume a vacancy"),
+                BotCommand("stop", "Stop a vacancy"),
+                BotCommand("status", "See bot status"),
+                BotCommand("school", "School / busy mode"),
+            ])
+
+        app = ApplicationBuilder().token(self.config.bot_token).post_init(post_init).build()
         b = self
         conv = ConversationHandler(
             entry_points=[CommandHandler("newvacancy", b.newvacancy_entry)],
