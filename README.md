@@ -144,8 +144,43 @@ Yes — if you solve it, the bot reuses your cookie. Steps on the RDP:
    different browser / machine / IP, Cloudflare may reject the cookie.
 
 **Expiry:** `cf_clearance` typically expires in ~30min–2h (sometimes
-longer). When it expires you will see the Cloudflare error again —
-just re-solve in Edge + update `.env` (no restart needed).
+longer — one user-verified cookie lasted a year). When it expires you
+will see the Cloudflare error again — just re-solve in Edge + update
+`.env` (no restart needed).
+
+### Troubleshooting CF_CLEARANCE — `/config` tells you if the bot sees it
+
+After `git pull` + restart, send `/config` in Telegram. It shows
+(without ever showing the value):
+
+```text
+CF_CLEARANCE: set (len 213, from .env file)
+JIJI_USER_AGENT: Mozilla/5.0 ... Edg/131.0.0.0
+.env path checked: C:\jobilate-recruiter-bot\.env
+BROWSER_CHANNELS: msedge → chrome → Chromium
+```
+
+If `/config` says `CF_CLEARANCE: NOT SET` even though you added it,
+check these (in order):
+
+1. **Filename must be exactly `.env`.** Notepad's default "Save as
+   type: Text Documents" saves it as **`.env.txt`** — and the bot
+   ignores `.env.txt` on purpose. Fix: in Notepad use
+   File → Save As → "Save as type: **All Files**" → filename `.env`.
+2. **One line, no breaks, no quotes, no spaces around `=`.**
+   `CF_CLEARANCE=<long value>` on a single line. A line break in the
+   middle truncates it and Cloudflare rejects it.
+3. **User-Agent must match the Edge that solved it.** The cookie was
+   solved with a specific Edge version (e.g. Edge 155). The bot's
+   default UA is Edge 131. If your Edge is newer, copy your exact UA
+   from `edge://version` (the "User Agent" line) and set in `.env`:
+   ```text
+   JIJI_USER_AGENT=<exact UA from edge://version>
+   ```
+   No restart needed — the bot re-reads `.env` on every scrape.
+4. **No restart needed after a `.env` edit** (bot re-reads `.env`
+   on every scrape). Verify with `/config` — it should flip to
+   `CF_CLEARANCE: set`. You do NOT need to "load the env first".
 
 Windows RDP steps (one-time):
 ```powershell

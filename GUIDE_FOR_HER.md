@@ -163,7 +163,9 @@ The bot uses real Microsoft Edge now (same browser you use) and
 clicks "Verify you're human" itself — you don't need to solve it.
 If it says "Jiji blocked, retrying later" or "Cloudflare 'Just a
 moment...' challenge", just wait. It retries by itself. You can also
-send `/scrape 1` to try again.
+send `/scrape 1` to try again. `/config` tells you if the cookie is
+set — if it says NOT SET, check the `.env` filename (it must be
+exactly `.env`, not `.env.txt`).
 
 ## 10. If something looks wrong
 

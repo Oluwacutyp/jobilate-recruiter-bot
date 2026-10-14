@@ -4,17 +4,17 @@ ADDITIVE ONLY: the requests path in scraper.py stays the fast/default
 path. This module is used ONLY when requests hits a challenge/block
 page.
 
-User-verified 2026-10-14: same RDP, same IP — real Chrome passes
+User-verified 2026-10-14: same RDP, same IP — real Edge passes
 Cloudflare, bot's Playwright Chromium gets "Just a moment..."
 (title='Just a moment...', anchors=2). That PROVES it is NOT IP
-blocking alone — it is automation fingerprinting. Chrome passes
-because it is real Chrome + human signals. Playwright's bundled
+blocking alone — it is automation fingerprinting. Edge passes
+because it is real Edge + human signals. Playwright's bundled
 Chromium fails because it is detected (navigator.webdriver, CDP
 flags, missing human signals, fresh profile).
 
 So this fallback now (ADDITIVE — requests path unchanged):
-- launches REAL Google Chrome (channel="chrome"), falling back to
-  Playwright's Chromium only if Chrome is not installed;
+- launches REAL Microsoft Edge (channel="msedge"), falling back to
+  Chrome -> Playwright's Chromium only if Edge is not installed;
 - applies a standard stealth init script (hides navigator.webdriver,
   spoofs window.chrome / plugins / languages / permissions — no
   solving services, no token forgery, no CDP evasion tricks);
@@ -57,7 +57,7 @@ TURNSTILE_PHRASES: tuple[str, ...] = (
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0"
+    "Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
 )
 
 # Playwright channel fallback order: Edge (preinstalled on Windows RDP,
@@ -133,8 +133,46 @@ def jiji_user_agent(dotenv_path: str | None = None) -> str:
         return from_file
     return os.environ.get("JIJI_USER_AGENT", "").strip() or DEFAULT_USER_AGENT
 
+
+def dotenv_path_checked(dotenv_path: str | None = None) -> str:
+    """First existing .env candidate, else the repo-root .env path.
+
+    Used by /config so the user can verify WHICH .env the bot reads.
+    Note: only the exact filename ".env" is ever read — ".env.txt"
+    (what Notepad saves when "Save as type" is Text) is ignored.
+    """
+    candidates = _dotenv_candidates(dotenv_path)
+    for path in candidates:
+        try:
+            if path and os.path.isfile(path):
+                return os.path.abspath(path)
+        except Exception:
+            continue
+    return os.path.abspath(candidates[-1]) if candidates else ""
+
+
+def cf_clearance_status(dotenv_path: str | None = None) -> dict:
+    """CF_CLEARANCE diagnostics WITHOUT the value (never log it).
+
+    Returns {"set": bool, "length": int, "source": str, "env_path": str}.
+    "source" is ".env file" / "environment" / "". The cookie value
+    itself is never returned, logged, or put in errors.
+    """
+    from_file = _read_dotenv_value("CF_CLEARANCE", dotenv_path)
+    if from_file:
+        return {"set": True, "length": len(from_file),
+                "source": ".env file",
+                "env_path": dotenv_path_checked(dotenv_path)}
+    env_val = os.environ.get("CF_CLEARANCE", "").strip()
+    if env_val:
+        return {"set": True, "length": len(env_val),
+                "source": "environment",
+                "env_path": dotenv_path_checked(dotenv_path)}
+    return {"set": False, "length": 0, "source": "",
+            "env_path": dotenv_path_checked(dotenv_path)}
+
 # Standard stealth init script: hide automation flags + restore the
-# signals a real Chrome has. No solving services, no token forgery,
+# signals a real Edge has. No solving services, no token forgery,
 # no CDP evasion tricks — only hiding the automation markers that
 # Cloudflare uses to flag Playwright's bundled Chromium.
 STEALTH_INIT_SCRIPT = """
@@ -164,7 +202,7 @@ if (navigator.deviceMemory === undefined) {
 
 # Cloudflare automatic JS challenge ("Just a moment..." interstitial).
 # This is NOT the Turnstile checkbox — there is nothing to click on
-# this page; the browser must pass the automatic check (real Chrome +
+# this page; the browser must pass the automatic check (real Edge +
 # human signals + time) for the title to change to the real listing.
 CLOUDFLARE_CHALLENGE_TITLES: tuple[str, ...] = (
     "just a moment",
@@ -217,7 +255,7 @@ def _cloudflare_error(url: str, title: str = "", anchors: int = -1, html_len: in
 
     return JijiScrapeError(
         "Cloudflare 'Just a moment...' challenge — bot's browser was flagged "
-        "as automated. Try real Chrome profile / CF_CLEARANCE, or wait and retry. "
+        "as automated. Try real Edge profile / CF_CLEARANCE, or wait and retry. "
         f"for {_truncate_url(url)} diag: title={str(title)[:120]!r} anchors={anchors} html_len={html_len}"
     )
 
