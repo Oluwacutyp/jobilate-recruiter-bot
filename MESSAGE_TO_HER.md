@@ -82,7 +82,7 @@ New people to review, people you never text yet, follow-ups wey don due.
 Bot go click am itself now — you no need solve am for Chrome. If e talk say "Jiji blocked, retrying later", just wait. E go retry by itself. You fit send `/scrape 1` to try again.
 
 **10. If something look wrong**
-Wrong vacancy? `/edit 1 pay_text=₦600,000`
+Wrong vacancy? `/edit 1 pay_text=₦600,000` — and multi-word values work too, e.g. `/edit 1 title=Sales Supervisor`
 Wrong person? `/block 5` hide am. `/unblock 5` bring am back.
 Bot dey send too much? `/live 1 off` — e go stop live push for vacancy 1. You go still get everything with `/harvest`.
 Still wrong? Send `/status` and tell me wetin you see.

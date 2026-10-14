@@ -138,6 +138,34 @@ def _vid(args: list[str]) -> int | None:
         return None
 
 
+# Fields /edit accepts (must match Store.update_vacancy's allowed set).
+EDIT_FIELDS = (
+    "title", "category", "location", "pay_text", "pay_min", "job_type",
+    "requirements_text", "education_required", "min_years", "employer",
+    "deadline", "contact", "priority", "status", "live_push", "school_mode",
+)
+# Longest first so e.g. "pay_text" wins over any shorter prefix in alternation.
+_EDIT_FIELDS_RE = "|".join(sorted(EDIT_FIELDS, key=len, reverse=True))
+_EDIT_PAIR_RE = re.compile(
+    rf"({_EDIT_FIELDS_RE})\s*=\s*(.*?)(?=\s+(?:{_EDIT_FIELDS_RE})\s*=|$)"
+)
+
+
+def parse_edit_fields(text: str) -> dict:
+    """Parse /edit field=value pairs, allowing multi-word values.
+
+    Values run until the next known ``field=`` or end-of-string, so
+    ``title=Sales Supervisor`` → ``{"title": "Sales Supervisor"}`` and
+    ``title=Sales Supervisor location=Lagos State`` → both fields.
+    Single-word values behave exactly as before. Unknown ``foo=bar``
+    pairs are ignored (store rejects them → "Nothing updated").
+    """
+    fields: dict = {}
+    for m in _EDIT_PAIR_RE.finditer(text or ""):
+        fields[m.group(1)] = m.group(2).strip()
+    return fields
+
+
 class JobilateBot:
     def __init__(self, config: Config, store: Store):
         self.config = config
@@ -289,17 +317,15 @@ class JobilateBot:
     async def cmd_edit(self, update, context):
         args = context.args or []
         if len(args) < 2 or "=" not in " ".join(args[1:]):
-            await update.message.reply_text("Usage: /edit <id> field=value [field=value ...]\nFields: title, location, pay_text, job_type, requirements_text, employer, deadline, contact, priority, status")
+            await update.message.reply_text("Usage: /edit <id> field=value [field=value ...]  e.g. /edit 1 title=Sales Supervisor\nFields: title, location, pay_text, job_type, requirements_text, employer, deadline, contact, priority, status")
             return
         v, err = self._vacancy_or_reply(_vid(args))
         if err:
             await update.message.reply_text(err)
             return
-        fields: dict = {}
-        for part in args[1:]:
-            if "=" in part:
-                k, val = part.split("=", 1)
-                fields[k.strip()] = val.strip()
+        # Join args back so multi-word values survive: title=Sales Supervisor
+        # → "Sales Supervisor", not "Sales". Values run to the next field=.
+        fields = parse_edit_fields(" ".join(args[1:]))
         ok = self.store.update_vacancy(v.id, **fields)
         await update.message.reply_text(f"Updated #{v.id}." if ok else "Nothing updated — check field names.")
 

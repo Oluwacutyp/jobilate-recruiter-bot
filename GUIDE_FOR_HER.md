@@ -163,7 +163,7 @@ itself. You can also send `/scrape 1` to try again.
 
 ## 10. If something looks wrong
 
-- Wrong vacancy details? `/edit 1 pay_text=₦600,000` (change what you need).
+- Wrong vacancy details? `/edit 1 pay_text=₦600,000` (change what you need). Multi-word values work too: `/edit 1 title=Sales Supervisor`.
 - Wrong candidate? `/block 5` hides them. `/unblock 5` brings them back.
 - Bot sent too much? `/live 1 off` turns off live push for vacancy 1.
   You will still get everything with `/harvest`.

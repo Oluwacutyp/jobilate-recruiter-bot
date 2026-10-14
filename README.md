@@ -136,7 +136,9 @@ vacancy still has a full-text title, fix it with:
 /edit 1 title=Sales Supervisor
 ```
 then `/scrape 1` to retry. Error messages never include the full URL
-— only the first 120 chars + "...".
+— only the first 120 chars + "...". `/edit` accepts multi-word values
+(`title=Sales Supervisor`, `location=Lagos State`) — values run to the
+next `field=`.
 
 ## Windows RDP deploy
 
