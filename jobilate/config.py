@@ -19,9 +19,21 @@ class Config:
     # ADDITIVE (2026-10-14): auto-scrape loop + morning to-do.
     scrape_interval_minutes: int = 30
     todo_hour: int = 8
+    # ADDITIVE (2026-10-14): Playwright Turnstile fallback.
+    playwright_enabled: bool = True
+    playwright_headless: bool = False
+    browser_profile_dir: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
+        def _bool(name: str, default: bool) -> bool:
+            raw = os.environ.get(name, "").strip().lower()
+            if raw in ("1", "true", "yes", "on"):
+                return True
+            if raw in ("0", "false", "no", "off"):
+                return False
+            return default
+
         def _int(name: str, default: int) -> int:
             try:
                 return int(os.environ.get(name, str(default)))
@@ -46,6 +58,13 @@ class Config:
             live_batch_size=_int("LIVE_BATCH_SIZE", 5),
             scrape_interval_minutes=_int("SCRAPE_INTERVAL_MINUTES", 30),
             todo_hour=_int("TODO_HOUR", 8),
+            playwright_enabled=_bool("PLAYWRIGHT_ENABLED", True),
+            playwright_headless=_bool(
+                "PLAYWRIGHT_HEADLESS",
+                # Headed on Windows (has a display, best Turnstile pass rate).
+                __import__("sys").platform != "win32",
+            ),
+            browser_profile_dir=os.environ.get("BROWSER_PROFILE_DIR", ""),
         )
 
     def validate(self, need_token: bool = True) -> list[str]:
