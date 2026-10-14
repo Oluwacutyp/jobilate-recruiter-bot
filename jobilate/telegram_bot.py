@@ -104,10 +104,73 @@ def guard_recipient(chat_id, admin_chat_id) -> None:
         raise PermissionError(f"Refused: outbound sends are only allowed to the recruiter chat, not {chat_id!r}")
 
 
+# Telegram rejects a single text message over 4096 chars
+# (telegram.error.BadRequest: Message is too long). A harvest digest
+# with many candidates easily exceeds that, so every long send goes
+# through this chunking — never one oversized message.
+MAX_TELEGRAM_TEXT = 4000  # under the 4096 hard limit, with margin.
+
+
+def split_long_message(text: str, limit: int = MAX_TELEGRAM_TEXT) -> list[str]:
+    """Split text into <=limit chunks at line boundaries (lossless).
+
+    ``"".join(chunks) == text`` always holds: chunk boundaries fall on
+    line boundaries, except that a single line longer than ``limit`` is
+    hard-split into limit-sized pieces (no content is dropped).
+    Empty text -> [] (Telegram rejects empty messages).
+    """
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    buf = ""
+    for line in text.splitlines(keepends=True):
+        if len(line) > limit:
+            if buf:
+                chunks.append(buf)
+                buf = ""
+            for i in range(0, len(line), limit):
+                chunks.append(line[i:i + limit])
+            continue
+        if buf and len(buf) + len(line) > limit:
+            chunks.append(buf)
+            buf = line
+        else:
+            buf += line
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+
+def _is_too_long_error(exc: BaseException) -> bool:
+    """True for Telegram's 'Message is too long' BadRequest (any casing)."""
+    return "too long" in str(exc).lower()
+
+
 async def send_to_recruiter(context, chat_id, text: str, admin_chat_id: str, **kwargs):
-    """The ONLY outbound-send helper. Guarded to the recruiter chat."""
+    """The ONLY outbound-send helper. Guarded to the recruiter chat.
+
+    Long texts are sent in <=4000-char chunks (Telegram's limit is
+    4096). As a safety net, a chunk that still fails as too long is
+    retried once, truncated with "..." — the send never crashes on
+    message length.
+    """
     guard_recipient(chat_id, admin_chat_id)
-    return await context.bot.send_message(chat_id=int(chat_id), text=text, **kwargs)
+    if not text:
+        return None
+    result = None
+    for i, chunk in enumerate(split_long_message(text)):
+        kw = kwargs if i == 0 else {}
+        try:
+            result = await context.bot.send_message(chat_id=int(chat_id), text=chunk, **kw)
+        except Exception as exc:  # noqa: BLE001 - only the too-long case is retried
+            if _is_too_long_error(exc):
+                result = await context.bot.send_message(
+                    chat_id=int(chat_id), text=chunk[:MAX_TELEGRAM_TEXT - 3] + "...", **kw)
+            else:
+                raise
+    return result
 
 
 def format_vacancy(v: Vacancy) -> str:
@@ -187,6 +250,27 @@ class JobilateBot:
         if not v:
             return None, f"No vacancy #{vid}. See /vacancies."
         return v, ""
+
+    async def _reply_long(self, update, text: str, **kwargs) -> None:
+        """Reply with text split into <=4000-char chunks (see split_long_message).
+
+        Short texts send as a single message (unchanged behaviour).
+        As a safety net, a chunk that still fails as too long is
+        retried once, truncated with "..." — the command never
+        crashes on message length. kwargs (e.g. reply_markup) go on
+        the first chunk only.
+        """
+        if not text:
+            return
+        for i, chunk in enumerate(split_long_message(text)):
+            kw = kwargs if i == 0 else {}
+            try:
+                await update.message.reply_text(chunk, **kw)
+            except Exception as exc:  # noqa: BLE001 - only the too-long case is retried
+                if _is_too_long_error(exc):
+                    await update.message.reply_text(chunk[:MAX_TELEGRAM_TEXT - 3] + "...", **kw)
+                else:
+                    raise
 
     # ---- basic ----
     async def cmd_start(self, update, context):
@@ -304,7 +388,7 @@ class JobilateBot:
             return
         name = args[1] if len(args) > 1 else ""
         txt = render_template({"title": v.title, "location": v.location, "pay_text": v.pay_text, "job_type": v.job_type, "requirements_text": v.requirements_text}, candidate_name=name)
-        await update.message.reply_text("Copy this fixed text and send it yourself:\n\n" + txt)
+        await self._reply_long(update, "Copy this fixed text and send it yourself:\n\n" + txt)
 
     async def cmd_limits(self, update, context):
         pw = getattr(self.config, 'playwright_enabled', True)
@@ -327,7 +411,7 @@ class JobilateBot:
         if not vacs:
             await update.message.reply_text("No vacancies yet. Send /newvacancy to add one.")
             return
-        await update.message.reply_text("\n\n".join(format_vacancy(v) for v in vacs))
+        await self._reply_long(update, "\n\n".join(format_vacancy(v) for v in vacs))
 
     async def cmd_vacancy(self, update, context):
         v, err = self._vacancy_or_reply(_vid(context.args or []))
@@ -335,7 +419,7 @@ class JobilateBot:
             await update.message.reply_text(err)
             return
         st = self.store.stats_for_vacancy(v.id)
-        await update.message.reply_text(format_vacancy(v) + f"\nCandidates: {st['total']} (T1 {st.get('Tier1', 0)} / T2 {st.get('Tier2', 0)} / T3 {st.get('Tier3', 0)})")
+        await self._reply_long(update, format_vacancy(v) + f"\nCandidates: {st['total']} (T1 {st.get('Tier1', 0)} / T2 {st.get('Tier2', 0)} / T3 {st.get('Tier3', 0)})")
 
     async def cmd_edit(self, update, context):
         args = context.args or []
@@ -431,7 +515,7 @@ class JobilateBot:
         if not links:
             await update.message.reply_text(f"No candidates yet for {v.label()}. Run a scrape / demo first.")
             return
-        await update.message.reply_text("\n\n".join(format_candidate_row(ln, self.store, v.id) for ln in links[:20]))
+        await self._reply_long(update, "\n\n".join(format_candidate_row(ln, self.store, v.id) for ln in links[:20]))
 
     async def cmd_candidate(self, update, context):
         try:
@@ -443,7 +527,8 @@ class JobilateBot:
         if not c:
             await update.message.reply_text(f"No candidate #{cid}.")
             return
-        await update.message.reply_text(
+        await self._reply_long(
+            update,
             f"#{c.id} {c.name}\n📞 {c.phone} · 📍 {c.location}\n{c.title}\n🎓 {c.highest_qualification or c.education or '—'}\n💼 {c.experience_years if c.experience_years is not None else '—'}y · 💰 {c.expected_salary or '—'}\nSkills: {c.skills or '—'}\nCV: {c.cv_url or '—'}\nBlocked: {'yes' if c.blocked else 'no'}")
 
     async def cmd_search(self, update, context):
@@ -455,14 +540,14 @@ class JobilateBot:
         if not hits:
             await update.message.reply_text(f"No candidates matching '{q}'.")
             return
-        await update.message.reply_text("\n\n".join(format_candidate_row(ln, self.store, ln["vacancy_id"]) for ln in hits[:15]))
+        await self._reply_long(update, "\n\n".join(format_candidate_row(ln, self.store, ln["vacancy_id"]) for ln in hits[:15]))
 
     async def cmd_feed(self, update, context):
         links = self.store.all_links()[-15:]
         if not links:
             await update.message.reply_text("Feed is empty — no matches yet.")
             return
-        await update.message.reply_text("\n\n".join(format_candidate_row(ln, self.store, ln["vacancy_id"]) for ln in links))
+        await self._reply_long(update, "\n\n".join(format_candidate_row(ln, self.store, ln["vacancy_id"]) for ln in links))
 
     async def cmd_stats(self, update, context):
         vid = _vid(context.args or [])
@@ -476,13 +561,13 @@ class JobilateBot:
             for k in sorted(st):
                 if k.startswith("mark:"):
                     lines.append(f"{k[5:]}: {st[k]}")
-            await update.message.reply_text("\n".join(lines))
+            await self._reply_long(update, "\n".join(lines))
             return
         lines = ["Stats — all vacancies"]
         for v in self.store.list_vacancies():
             st = self.store.stats_for_vacancy(v.id)
             lines.append(f"{v.label()}: {st['total']} (T1 {st.get('Tier1',0)} / T2 {st.get('Tier2',0)} / T3 {st.get('Tier3',0)})")
-        await update.message.reply_text("\n".join(lines))
+        await self._reply_long(update, "\n".join(lines))
 
     async def cmd_block(self, update, context):
         try:
@@ -511,7 +596,7 @@ class JobilateBot:
         if not links:
             await update.message.reply_text(f"No Interested candidates yet for {v.label()}.")
             return
-        await update.message.reply_text("⭐ Shortlist — " + v.label() + "\n\n" + "\n\n".join(format_candidate_row(ln, self.store, v.id) for ln in links))
+        await self._reply_long(update, "⭐ Shortlist — " + v.label() + "\n\n" + "\n\n".join(format_candidate_row(ln, self.store, v.id) for ln in links))
 
     async def cmd_contacts(self, update, context):
         links = self.store.all_links()
@@ -524,7 +609,7 @@ class JobilateBot:
         lines = ["📇 Contacts (for YOUR outreach only — bot never contacts them):"]
         for ln in seen.values():
             lines.append(f"{ln.get('name','')} — {ln.get('phone','')} — {ln.get('ctitle','')}")
-        await update.message.reply_text("\n".join(lines))
+        await self._reply_long(update, "\n".join(lines))
 
     async def cmd_mark(self, update, context):
         args = context.args or []
@@ -553,7 +638,7 @@ class JobilateBot:
         if err:
             await update.message.reply_text(err)
             return
-        await update.message.reply_text(interview_checklist({"title": v.title, "requirements_text": v.requirements_text}))
+        await self._reply_long(update, interview_checklist({"title": v.title, "requirements_text": v.requirements_text}))
 
     # ---- ADDITIVE commands: /howto, /keyboard, /scrape ----
     async def cmd_howto(self, update, context):
@@ -572,17 +657,7 @@ class JobilateBot:
             # Strip the leading "# For her" heading — the rest is the guide.
             if lines and lines[0].startswith("# For her"):
                 text = "\n".join(lines[1:]).strip()
-        chunks: list[str] = []
-        buf = ""
-        for line in text.splitlines():
-            if len(buf) + len(line) + 1 > 4000:
-                chunks.append(buf)
-                buf = line
-            else:
-                buf = f"{buf}\n{line}" if buf else line
-        if buf:
-            chunks.append(buf)
-        for chunk in chunks or [HOWTO_FALLBACK]:
+        for chunk in split_long_message(text) or [HOWTO_FALLBACK]:
             await update.message.reply_text(chunk)
 
     async def cmd_keyboard(self, update, context):
@@ -737,11 +812,11 @@ class JobilateBot:
                 return
             links = self.store.links_for_vacancy(v.id)
             label = v.label()
-            await update.message.reply_text(build_digest(links, label))
+            await self._reply_long(update, build_digest(links, label))
             await self._send_harvest_pack(update, links, label, f"export_{v.id}.zip", f"export_{v.id}.csv")
         else:
             links = self.store.all_links()
-            await update.message.reply_text(build_digest(links, "All vacancies"))
+            await self._reply_long(update, build_digest(links, "All vacancies"))
             await self._send_harvest_pack(update, links, "All vacancies", "export_all.zip", "export_all.csv")
 
     async def cmd_harvest(self, update, context):
@@ -761,7 +836,7 @@ class JobilateBot:
                     await update.message.reply_text("Usage: /harvest [vacancy_id|unsent|unsent_employer|all]")
                     return
         links, digest = harvest(self.store, vid, mode)
-        await update.message.reply_text(digest)
+        await self._reply_long(update, digest)
         if links:
             label = self.store.get_vacancy(vid).label() if vid else "All vacancies"
             await self._send_harvest_pack(update, links, label, f"harvest_{vid or 'all'}.zip", f"harvest_{vid or 'all'}.csv")
@@ -769,7 +844,7 @@ class JobilateBot:
     async def cmd_dump(self, update, context):
         vid = _vid(context.args or [])
         links, digest = harvest(self.store, vid, "all")
-        await update.message.reply_text(digest)
+        await self._reply_long(update, digest)
         if links:
             label = self.store.get_vacancy(vid).label() if vid else "All vacancies"
             await self._send_harvest_pack(update, links, label, f"dump_{vid or 'all'}.zip", f"dump_{vid or 'all'}.csv")
@@ -797,7 +872,7 @@ class JobilateBot:
             lines.append("\nFollow-ups due:")
             for ln in due[:10]:
                 lines.append(f"• #{ln['candidate_id']} {ln.get('name','')} — texted {ln.get('marked_at','')[:10]}")
-        await update.message.reply_text("\n".join(lines))
+        await self._reply_long(update, "\n".join(lines))
 
     async def cmd_demo(self, update, context):
         """Demo match run against bundled SAMPLE CVs (no scraping)."""
@@ -819,7 +894,7 @@ class JobilateBot:
         lines = [f"Demo run for {v.label()} — {len(added)} sample CVs scored:"]
         for cv, score, tier, reason in sorted(added, key=lambda x: -x[1]):
             lines.append(f"\n{tier} ({score:.0f}) {cv['name']} — {cv['title']}\nWhy: {reason}")
-        await update.message.reply_text("\n".join(lines))
+        await self._reply_long(update, "\n".join(lines))
 
     # ---- /newvacancy wizard ----
     def _save_vacancy_from_user_data(self, context) -> tuple[int | None, str]:
@@ -857,7 +932,8 @@ class JobilateBot:
                 return ROLE
             context.user_data["vacancy"] = parsed
             context.user_data["vacancy"]["raw_text"] = pasted
-            await update.message.reply_text(
+            await self._reply_long(
+                update,
                 f"I read this as:\n{self._draft_text(parsed)}\n\nTap YES to save it, or NO for the step-by-step wizard (or just type YES / NO).",
                 reply_markup=self._draft_keyboard())
             return CONFIRM
@@ -886,7 +962,8 @@ class JobilateBot:
             if vagueness(parsed) != "too_vague":
                 context.user_data["vacancy"] = parsed
                 context.user_data["vacancy"]["raw_text"] = text
-                await update.message.reply_text(
+                await self._reply_long(
+                    update,
                     f"I read this as:\n{self._draft_text(parsed)}\n\nTap YES to save it, or NO for the step-by-step wizard (or just type YES / NO).",
                     reply_markup=self._draft_keyboard())
                 return CONFIRM
@@ -948,7 +1025,7 @@ class JobilateBot:
             from telegram.ext import ConversationHandler
             return ConversationHandler.END
         vid, text = self._save_vacancy_from_user_data(context)
-        await update.message.reply_text(text)
+        await self._reply_long(update, text)
         from telegram.ext import ConversationHandler
         return ConversationHandler.END
 
@@ -1110,7 +1187,8 @@ class JobilateBot:
                 parsed = parse_vacancy_text(pasted)
                 context.user_data["vacancy"] = parsed
                 context.user_data["vacancy"]["raw_text"] = pasted
-                await update.message.reply_text(
+                await self._reply_long(
+                    update,
                     f"I read this as:\n{self._draft_text(parsed)}\n\nTap YES to save it, or NO for the step-by-step wizard (or just type YES / NO).",
                     reply_markup=self._draft_keyboard())
                 return
@@ -1179,14 +1257,15 @@ class JobilateBot:
             d.setdefault("job_type", "Full-Time")
             d.setdefault("priority", "Normal")
             context.user_data["wizard_step"] = "confirm"
-            await update.message.reply_text(
+            await self._reply_long(
+                update,
                 f"Please check:\n{self._draft_text(d)}\n\nTap YES to save, or NO to cancel (or just type YES / NO).",
                 reply_markup=self._draft_keyboard())
         elif step == "confirm":
             if text.strip().lower() in ("yes", "y", "ok", "confirm", "save"):
                 context.user_data.pop("wizard_step", None)
                 _vid_saved, msg = self._save_vacancy_from_user_data(context)
-                await update.message.reply_text(msg)
+                await self._reply_long(update, msg)
             else:
                 context.user_data.pop("wizard_step", None)
                 context.user_data.pop("vacancy", None)

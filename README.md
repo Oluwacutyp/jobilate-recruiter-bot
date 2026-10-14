@@ -51,6 +51,10 @@ one digest message + one ZIP with those CVs. If a ZIP would exceed 45MB,
 the bot sends digest + CSV only + a plain note (text CVs are tiny, so
 this is a safety cap, not the normal path).
 
+Long digests are sent in ≤4000-char parts (Telegram's limit is 4096),
+never rejected as "Message is too long" — `/harvest`, `/dump`, `/export`,
+live push, and long lists all chunk the same way.
+
 How to unzip:
 - **Android:** tap the ZIP in Telegram → Extract, or open it with the
   Files app → long-press the ZIP → Extract. The `.txt` CV files appear next to it.
