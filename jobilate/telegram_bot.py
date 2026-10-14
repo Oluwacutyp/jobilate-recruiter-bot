@@ -8,12 +8,26 @@ There is no code path that sends to any other chat.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import os
+import re
 import zipfile
 from datetime import datetime
+from types import SimpleNamespace
 
 from . import __version__
+from .autoscrape import (
+    HOWTO_FALLBACK,
+    REPLY_BUTTON_ACTIONS,
+    SHORT_HELP_TEXT,
+    build_reply_keyboard,
+    build_reply_keyboard_remove,
+    looks_like_vacancy,
+    scrape_all_active,
+    scrape_one_vacancy,
+    should_send_todo,
+)
 from .config import Config
 from .csv_export import CSV_COLUMNS, build_digest, write_csv
 from .cv_files import (
@@ -151,10 +165,32 @@ class JobilateBot:
         if vid is not None:
             await update.message.reply_text(self._set_status(vid, "active"))
             return
-        await update.message.reply_text("Welcome to Jobilate Recruiter Bot 🤝\n\nI find CVs on public Jiji pages and bring them to you. I never contact candidates — you text them yourself.\n\nSend /newvacancy to add a vacancy, or /help for all commands.")
+        # ADDITIVE: inline buttons under the welcome + persistent bottom
+        # reply keyboard (second message — one message carries one keyboard).
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add Vacancy", callback_data="nav:newvacancy"),
+             InlineKeyboardButton("📋 My Vacancies", callback_data="nav:vacancies")],
+            [InlineKeyboardButton("📥 Harvest", callback_data="nav:harvest"),
+             InlineKeyboardButton("📝 To-Do", callback_data="nav:todo")],
+            [InlineKeyboardButton("❓ How to use", callback_data="nav:howto")],
+        ])
+        await update.message.reply_text(
+            "Welcome to Jobilate Recruiter Bot 🤝\n\nI find CVs on public Jiji pages and bring them to you. I never contact candidates — you text them yourself.\n\nTap a button below, or send /newvacancy to add a vacancy. /help shows the short list.",
+            reply_markup=keyboard)
+        await update.message.reply_text(
+            "Quick buttons below 👇 — tap one, same as typing the command.",
+            reply_markup=build_reply_keyboard())
 
     async def cmd_help(self, update, context):
-        await update.message.reply_text(HELP_TEXT)
+        # ADDITIVE: bare /help shows the SHORT list; /help all shows the
+        # full existing HELP_TEXT (unchanged).
+        args = [a.lower() for a in (context.args or [])]
+        if args and args[0] == "all":
+            await update.message.reply_text(HELP_TEXT)
+            return
+        await update.message.reply_text(SHORT_HELP_TEXT, reply_markup=build_reply_keyboard())
 
     async def cmd_status(self, update, context):
         vacs = self.store.list_vacancies()
@@ -171,12 +207,12 @@ class JobilateBot:
     async def cmd_config(self, update, context):
         c = self.config
         await update.message.reply_text(
-            f"Config (no secrets shown):\nDATA_DIR={c.data_dir}\nQUIET_HOURS={c.quiet_hours_start:02d}:00–{c.quiet_hours_end:02d}:00\nSCRAPE_MIN_DELAY={c.scrape_min_delay_seconds}s\nCACHE_TTL={c.cache_ttl_minutes} min\nLIVE_BATCH={c.live_batch_minutes} min / {c.live_batch_size} new\nSchool mode: {'on' if self.school_mode else 'off'}\nVersion: {__version__}")
+            f"Config (no secrets shown):\nDATA_DIR={c.data_dir}\nQUIET_HOURS={c.quiet_hours_start:02d}:00–{c.quiet_hours_end:02d}:00\nSCRAPE_MIN_DELAY={c.scrape_min_delay_seconds}s\nCACHE_TTL={c.cache_ttl_minutes} min\nLIVE_BATCH={c.live_batch_minutes} min / {c.live_batch_size} new\nSCRAPE_INTERVAL={c.scrape_interval_minutes} min\nTODO_HOUR={c.todo_hour:02d}:00\nSchool mode: {'on' if self.school_mode else 'off'}\nVersion: {__version__}")
 
     async def cmd_set(self, update, context):
         args = context.args or []
         if len(args) < 2:
-            await update.message.reply_text("Usage: /set <key> <value>\nKeys: quiet_start, quiet_end, live_batch_minutes, live_batch_size, school")
+            await update.message.reply_text("Usage: /set <key> <value>\nKeys: quiet_start, quiet_end, live_batch_minutes, live_batch_size, school, scrape_interval_minutes, todo_hour")
             return
         key, val = args[0].lower(), args[1]
         try:
@@ -190,6 +226,10 @@ class JobilateBot:
             elif key == "live_batch_size":
                 self.config.live_batch_size = int(val)
                 self.live_queue.batch_size = int(val)
+            elif key in ("scrape_interval_minutes", "scrape_interval"):
+                self.config.scrape_interval_minutes = int(val)
+            elif key == "todo_hour":
+                self.config.todo_hour = int(val)
             elif key == "school":
                 self.school_mode = val.lower() in ("on", "1", "true", "yes")
             else:
@@ -275,8 +315,10 @@ class JobilateBot:
         self.store.update_vacancy(v.id, status=status)
         return f"{v.label()} → {status}."
 
-    async def cmd_start(self, update, context):
-        await update.message.reply_text(self._set_status(_vid(context.args or []), "active"))
+    # NOTE: the duplicate second cmd_start (which overwrote the welcome
+    # above and made bare /start reply "Usage: give a vacancy id") was
+    # removed as a bug fix. The single cmd_start above handles both
+    # bare /start (welcome) and /start <id> (activate).
 
     async def cmd_stop(self, update, context):
         await update.message.reply_text(self._set_status(_vid(context.args or []), "stopped"))
@@ -461,6 +503,100 @@ class JobilateBot:
             return
         await update.message.reply_text(interview_checklist({"title": v.title, "requirements_text": v.requirements_text}))
 
+    # ---- ADDITIVE commands: /howto, /keyboard, /scrape ----
+    async def cmd_howto(self, update, context):
+        """Send the MESSAGE_TO_HER guide in-chat, split into <=4000-char parts."""
+        text = ""
+        guide_path = os.path.join(os.path.dirname(__file__), "..", "MESSAGE_TO_HER.md")
+        try:
+            with open(guide_path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            text = ""
+        if not text.strip():
+            text = HOWTO_FALLBACK
+        else:
+            lines = text.splitlines()
+            # Strip the leading "# For her" heading — the rest is the guide.
+            if lines and lines[0].startswith("# For her"):
+                text = "\n".join(lines[1:]).strip()
+        chunks: list[str] = []
+        buf = ""
+        for line in text.splitlines():
+            if len(buf) + len(line) + 1 > 4000:
+                chunks.append(buf)
+                buf = line
+            else:
+                buf = f"{buf}\n{line}" if buf else line
+        if buf:
+            chunks.append(buf)
+        for chunk in chunks or [HOWTO_FALLBACK]:
+            await update.message.reply_text(chunk)
+
+    async def cmd_keyboard(self, update, context):
+        """Show / hide the persistent bottom reply keyboard."""
+        args = [a.lower() for a in (context.args or [])]
+        if args and args[0] == "off":
+            await update.message.reply_text(
+                "Bottom buttons hidden. Send /keyboard on to bring them back.",
+                reply_markup=build_reply_keyboard_remove())
+            return
+        if args and args[0] not in ("on",):
+            await update.message.reply_text("Usage: /keyboard on|off")
+            return
+        await update.message.reply_text(
+            "Bottom buttons on 👇 — tap one, same as typing the command.",
+            reply_markup=build_reply_keyboard())
+
+    async def cmd_scrape(self, update, context):
+        """Manual scrape trigger (ADDITIVE — does not replace /demo).
+
+        Scrapes one vacancy (/scrape <id>) or all active vacancies,
+        stores new matches, and delivers them now (unless quiet hours,
+        school mode, or live push is off for that vacancy — then the
+        matches are stored for /harvest).
+        """
+        from .scraper import JijiScraper
+
+        vid = _vid(context.args or [])
+        if vid is not None:
+            v, err = self._vacancy_or_reply(vid)
+            if err:
+                await update.message.reply_text(err)
+                return
+            targets = [v]
+        else:
+            targets = self.store.list_vacancies(status="active")
+            if not targets:
+                await update.message.reply_text("No active vacancies. Add one with /newvacancy first.")
+                return
+        scraper = JijiScraper(
+            min_delay=self.config.scrape_min_delay_seconds,
+            cache_ttl_seconds=self.config.cache_ttl_minutes * 60,
+        )
+        chat_id = update.effective_chat.id
+        for v in targets:
+            new_links, err = scrape_one_vacancy(self.store, v, scraper)
+            if err:
+                await update.message.reply_text(f"Jiji blocked, retrying later: {err}")
+                continue
+            if not new_links:
+                await update.message.reply_text(f"No new matches for {v.label()} this run.")
+                continue
+            if self.school_mode:
+                await update.message.reply_text(
+                    f"Found {len(new_links)} new for {v.label()} — school mode is on, saved for /harvest.")
+                continue
+            if self._quiet_now():
+                await update.message.reply_text(
+                    f"Found {len(new_links)} new for {v.label()} — quiet hours, saved for /harvest.")
+                continue
+            if not v.live_push:
+                await update.message.reply_text(
+                    f"Found {len(new_links)} new for {v.label()} — live push is off, saved for /harvest.")
+                continue
+            await self.send_live_push(SimpleNamespace(bot=context.bot), chat_id, v.label(), new_links)
+
     # ---- export / harvest / backup ----
     async def _send_csv(self, update, links: list[dict], vacancy_label: str, filename: str) -> str:
         os.makedirs(self.config.data_dir, exist_ok=True)
@@ -628,10 +764,33 @@ class JobilateBot:
         await update.message.reply_text("\n".join(lines))
 
     # ---- /newvacancy wizard ----
+    def _save_vacancy_from_user_data(self, context) -> tuple[int | None, str]:
+        """Save the draft in user_data as an ACTIVE vacancy. Shared by the
+        typed-YES path, the YES-button path, and the just-paste path."""
+        d = context.user_data.get("vacancy", {})
+        if not d:
+            return None, "Nothing to save."
+        v = Vacancy(title=d.get("title", ""), location=d.get("location", ""), pay_text=d.get("pay_text", ""), pay_min=d.get("pay_min"), job_type=d.get("job_type", "Full-Time"), requirements_text=d.get("requirements_text", ""), education_required=d.get("education_required", ""), min_years=d.get("min_years"), employer=d.get("employer", ""), deadline=d.get("deadline", ""), contact=d.get("contact", ""), priority=d.get("priority", "Normal"), status="active", raw_text=d.get("raw_text", ""))
+        vid = self.store.add_vacancy(v)
+        context.user_data.pop("vacancy", None)
+        return vid, f"Saved as vacancy #{vid} and set ACTIVE.\n\n{format_vacancy(self.store.get_vacancy(vid))}\n\nThe bot will scrape Jiji by itself and send you new matches. Or /demo {vid} for a demo match now."
+
+    def _draft_keyboard(self):
+        """YES / NO inline buttons for a vacancy draft (ADDITIVE — typing
+        YES / NO still works exactly as before)."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ YES — Save", callback_data="vacsave:yes"),
+             InlineKeyboardButton("❌ NO — Wizard", callback_data="vacsave:no")],
+        ])
+
     async def newvacancy_entry(self, update, context):
         text = (update.message.text or "").strip()
         # Pasted full vacancy after the command: parse immediately.
-        pasted = text[len("/newvacancy"):].strip()
+        # Strip ANY of the alias commands (/newvacancy, /newvacancies,
+        # /addvacancy) — not just "/newvacancy" by fixed length.
+        pasted = re.sub(r"^/\w+(?:@\w+)?\s*", "", text, count=1) if text.startswith("/") else text
         if pasted:
             parsed = parse_vacancy_text(pasted)
             vague = vagueness(parsed)
@@ -640,7 +799,9 @@ class JobilateBot:
                 return ROLE
             context.user_data["vacancy"] = parsed
             context.user_data["vacancy"]["raw_text"] = pasted
-            await update.message.reply_text(f"I read this as:\n{self._draft_text(parsed)}\n\nReply YES to save it, or NO to start the step-by-step wizard.")
+            await update.message.reply_text(
+                f"I read this as:\n{self._draft_text(parsed)}\n\nTap YES to save it, or NO for the step-by-step wizard (or just type YES / NO).",
+                reply_markup=self._draft_keyboard())
             return CONFIRM
         context.user_data["vacancy"] = {}
         await update.message.reply_text("Let's add a vacancy.\n\nStep 1 — What is the role? (e.g. Sales Supervisor)")
@@ -692,7 +853,9 @@ class JobilateBot:
         d = context.user_data["vacancy"]
         d.setdefault("job_type", "Full-Time")
         d.setdefault("priority", "Normal")
-        await update.message.reply_text(f"Please check:\n{self._draft_text(d)}\n\nReply YES to save, or NO to cancel.")
+        await update.message.reply_text(
+            f"Please check:\n{self._draft_text(d)}\n\nTap YES to save, or NO to cancel (or just type YES / NO).",
+            reply_markup=self._draft_keyboard())
         return CONFIRM
 
     async def newvacancy_confirm(self, update, context):
@@ -702,13 +865,40 @@ class JobilateBot:
             await update.message.reply_text("Cancelled. Send /newvacancy to try again.")
             from telegram.ext import ConversationHandler
             return ConversationHandler.END
-        d = context.user_data.get("vacancy", {})
-        v = Vacancy(title=d.get("title", ""), location=d.get("location", ""), pay_text=d.get("pay_text", ""), pay_min=d.get("pay_min"), job_type=d.get("job_type", "Full-Time"), requirements_text=d.get("requirements_text", ""), education_required=d.get("education_required", ""), min_years=d.get("min_years"), employer=d.get("employer", ""), deadline=d.get("deadline", ""), contact=d.get("contact", ""), priority=d.get("priority", "Normal"), status="active", raw_text=d.get("raw_text", ""))
-        vid = self.store.add_vacancy(v)
-        context.user_data.pop("vacancy", None)
-        await update.message.reply_text(f"Saved as vacancy #{vid} and set ACTIVE.\n\n{format_vacancy(self.store.get_vacancy(vid))}\n\nNext: /demo {vid} to try a demo match, or wait for scraping to find CVs.")
+        vid, text = self._save_vacancy_from_user_data(context)
+        await update.message.reply_text(text)
         from telegram.ext import ConversationHandler
         return ConversationHandler.END
+
+    async def newvacancy_confirm_button(self, update, context):
+        """YES / NO buttons on a vacancy draft (inside the conversation).
+
+        Same save logic as typing YES; NO restarts the step-by-step wizard.
+        """
+        from telegram.ext import ConversationHandler
+
+        q = update.callback_query
+        await q.answer()
+        choice = (q.data or "").split(":", 1)[1] if ":" in (q.data or "") else ""
+        if choice == "yes":
+            vid, text = self._save_vacancy_from_user_data(context)
+            await q.edit_message_text(text)
+            return ConversationHandler.END
+        # NO -> restart the step-by-step wizard from Step 1.
+        context.user_data["vacancy"] = {}
+        await q.edit_message_text("OK — step-by-step wizard.\n\nStep 1 — What is the role? (e.g. Sales Supervisor)")
+        return ROLE
+
+    async def newvacancy_entry_from_button(self, update, context):
+        """➕ Add Vacancy inline button -> enter the wizard at Step 1.
+
+        ConversationHandler entry point for callback "nav:newvacancy".
+        """
+        q = update.callback_query
+        await q.answer()
+        context.user_data["vacancy"] = {}
+        await q.message.reply_text("Let's add a vacancy.\n\nStep 1 — What is the role? (e.g. Sales Supervisor)")
+        return ROLE
 
     async def newvacancy_cancel(self, update, context):
         context.user_data.pop("vacancy", None)
@@ -716,11 +906,64 @@ class JobilateBot:
         from telegram.ext import ConversationHandler
         return ConversationHandler.END
 
-    # ---- callback buttons (one-tap marks) ----
+    # ---- callback buttons (one-tap marks + ADDITIVE nav / paste / draft) ----
     async def on_callback(self, update, context):
         q = update.callback_query
         await q.answer()
         data = (q.data or "")
+        # ADDITIVE: nav buttons (inline welcome buttons) — same logic as
+        # the /commands. Runs through a shim so cmd_* handlers see a
+        # message-like update. "nav:newvacancy" is handled by the
+        # ConversationHandler entry point and rarely reaches here.
+        if data.startswith("nav:"):
+            action = data[4:]
+            if action == "newvacancy":
+                await q.edit_message_text("Tap /newvacancy to start the wizard, or just paste the vacancy here.")
+                return
+            shim = SimpleNamespace(message=q.message, effective_chat=q.message.chat, callback_query=q)
+            if action == "vacancies":
+                await self.cmd_vacancies(shim, context)
+            elif action == "harvest":
+                await self.cmd_harvest(shim, context)
+            elif action == "todo":
+                await self.cmd_todo(shim, context)
+            elif action == "howto":
+                await self.cmd_howto(shim, context)
+            elif action == "status":
+                await self.cmd_status(shim, context)
+            else:
+                await q.edit_message_text("Unknown button.")
+            return
+        # ADDITIVE: just-paste confirmation buttons.
+        if data.startswith("pastevac:"):
+            choice = data.split(":", 1)[1] if ":" in data else ""
+            if choice == "yes":
+                pasted = context.user_data.pop("paste_pending_text", "")
+                if not pasted:
+                    await q.edit_message_text("Nothing to save — paste the vacancy again.")
+                    return
+                parsed = parse_vacancy_text(pasted)
+                context.user_data["vacancy"] = parsed
+                context.user_data["vacancy"]["raw_text"] = pasted
+                await q.edit_message_text(
+                    f"I read this as:\n{self._draft_text(parsed)}\n\nTap YES to save it, or NO for the step-by-step wizard (or just type YES / NO).",
+                    reply_markup=self._draft_keyboard())
+                return
+            context.user_data.pop("paste_pending_text", None)
+            await q.edit_message_text("OK, ignored.")
+            return
+        # ADDITIVE: YES / NO draft buttons when NOT inside the conversation
+        # (just-paste flow). Inside the conversation, the CONFIRM-state
+        # handler (newvacancy_confirm_button) takes precedence.
+        if data.startswith("vacsave:"):
+            choice = data.split(":", 1)[1] if ":" in data else ""
+            if choice == "yes":
+                _vid_saved, text = self._save_vacancy_from_user_data(context)
+                await q.edit_message_text(text)
+                return
+            context.user_data.pop("vacancy", None)
+            await q.edit_message_text("Cancelled. Send /newvacancy to try again, or just paste the vacancy.")
+            return
         parts = data.split(":")
         if len(parts) == 4 and parts[0] == "mark":
             try:
@@ -737,13 +980,232 @@ class JobilateBot:
             return
         await q.edit_message_text("Unknown button.")
 
+    # ---- ADDITIVE: plain-text handler (reply-keyboard buttons, just-paste,
+    # manual wizard continuation when the wizard was started via a button) ----
+    async def handle_plaintext(self, update, context):
+        """Non-command text when NOT inside a conversation.
+
+        The ConversationHandler is registered first, so wizard messages
+        never reach here. This only sees free chat: reply-keyboard button
+        labels, just-paste vacancy text, yes/no answers, or plain chat
+        (ignored).
+        """
+        text = (update.message.text or "").strip()
+        if not text:
+            return
+        # 1. Reply-keyboard button labels -> same logic as the /commands.
+        action = REPLY_BUTTON_ACTIONS.get(text)
+        if action:
+            if action == "newvacancy":
+                # Manual wizard (started via a bottom button, outside the
+                # ConversationHandler): Step 1 prompt, continuation is
+                # driven by wizard_step in user_data (see below).
+                context.user_data["vacancy"] = {}
+                context.user_data["wizard_step"] = "title"
+                await update.message.reply_text("Let's add a vacancy.\n\nStep 1 — What is the role? (e.g. Sales Supervisor)")
+                return
+            if action == "vacancies":
+                await self.cmd_vacancies(update, context)
+            elif action == "harvest":
+                await self.cmd_harvest(update, context)
+            elif action == "todo":
+                await self.cmd_todo(update, context)
+            elif action == "status":
+                await self.cmd_status(update, context)
+            elif action == "howto":
+                await self.cmd_howto(update, context)
+            return
+        # 2. Manual wizard continuation (button-started wizard only).
+        step = context.user_data.get("wizard_step")
+        if step:
+            await self._manual_wizard_step(update, context, step, text)
+            return
+        # 3. Just-paste confirmation answers.
+        if context.user_data.get("paste_pending_text"):
+            low = text.lower()
+            if low in ("yes", "y", "ok"):
+                pasted = context.user_data.pop("paste_pending_text", "")
+                parsed = parse_vacancy_text(pasted)
+                context.user_data["vacancy"] = parsed
+                context.user_data["vacancy"]["raw_text"] = pasted
+                await update.message.reply_text(
+                    f"I read this as:\n{self._draft_text(parsed)}\n\nTap YES to save it, or NO for the step-by-step wizard (or just type YES / NO).",
+                    reply_markup=self._draft_keyboard())
+                return
+            if low in ("no", "n", "cancel"):
+                context.user_data.pop("paste_pending_text", None)
+                await update.message.reply_text("OK, ignored.")
+                return
+            # New text replaces the pending paste: fall through to detection.
+            context.user_data.pop("paste_pending_text", None)
+        # 4. Just-paste vacancy detection (conservative).
+        if looks_like_vacancy(text):
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            context.user_data["paste_pending_text"] = text
+            await update.message.reply_text(
+                "Is this a new vacancy?",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Yes", callback_data="pastevac:yes"),
+                     InlineKeyboardButton("❌ No", callback_data="pastevac:no")],
+                ]))
+            return
+        # 5. Plain chat ("hi", "ok", ...) — ignore quietly.
+        return
+
+    async def _manual_wizard_step(self, update, context, step: str, text: str):
+        """One step of the button-started manual wizard.
+
+        Mirrors the ConversationHandler wizard prompts. Typing /cancel
+        is handled by the global /cancel handler, not here.
+        """
+        d = context.user_data.setdefault("vacancy", {})
+        if step == "title":
+            d["title"] = text
+            context.user_data["wizard_step"] = "location"
+            await update.message.reply_text("Step 2 — Location? (e.g. Lagos State)")
+        elif step == "location":
+            d["location"] = text
+            context.user_data["wizard_step"] = "pay"
+            await update.message.reply_text("Step 3 — Pay? (e.g. ₦500,000+/month, or 'not stated')")
+        elif step == "pay":
+            from .vacancy_parser import parse_pay
+
+            d["pay_text"] = text
+            _, pay_min = parse_pay(text)
+            d["pay_min"] = pay_min
+            context.user_data["wizard_step"] = "req"
+            await update.message.reply_text("Step 4 — Requirements? (education, years of experience, skills — one message)")
+        elif step == "req":
+            from .vacancy_parser import extract_education, extract_years
+
+            d["requirements_text"] = text
+            d["education_required"] = extract_education(text)
+            d["min_years"] = extract_years(text)
+            context.user_data["wizard_step"] = "employer"
+            await update.message.reply_text("Step 5 — Employer / company name? (or 'not stated')")
+        elif step == "employer":
+            d["employer"] = text
+            context.user_data["wizard_step"] = "deadline"
+            await update.message.reply_text("Step 6 — Deadline? (e.g. 2026-10-31, or 'none')")
+        elif step == "deadline":
+            d["deadline"] = text
+            context.user_data["wizard_step"] = "contact"
+            await update.message.reply_text("Step 7 — Contact for this vacancy? (who should candidates reach — leave blank if same as usual)")
+        elif step == "contact":
+            d["contact"] = text
+            d.setdefault("job_type", "Full-Time")
+            d.setdefault("priority", "Normal")
+            context.user_data["wizard_step"] = "confirm"
+            await update.message.reply_text(
+                f"Please check:\n{self._draft_text(d)}\n\nTap YES to save, or NO to cancel (or just type YES / NO).",
+                reply_markup=self._draft_keyboard())
+        elif step == "confirm":
+            if text.strip().lower() in ("yes", "y", "ok", "confirm", "save"):
+                context.user_data.pop("wizard_step", None)
+                _vid_saved, msg = self._save_vacancy_from_user_data(context)
+                await update.message.reply_text(msg)
+            else:
+                context.user_data.pop("wizard_step", None)
+                context.user_data.pop("vacancy", None)
+                await update.message.reply_text("Cancelled. Send /newvacancy to try again.")
+        else:
+            context.user_data.pop("wizard_step", None)
+
+    # ---- ADDITIVE: scheduled auto-scrape + morning to-do ----
+    async def run_scheduled_tasks(self, context) -> str:
+        """One scheduled tick: scrape active vacancies + maybe send to-do.
+
+        Returns a short report. Never raises: Jiji errors are reported
+        to the recruiter once per hour, and the loop keeps going.
+        """
+        from .scraper import JijiScraper
+
+        if self.school_mode:
+            return "school mode — skipped"
+        chat_id = self.config.admin_chat_id
+        if not chat_id:
+            return "no admin chat — skipped"
+        now = datetime.now()
+        scraper = JijiScraper(
+            min_delay=self.config.scrape_min_delay_seconds,
+            cache_ttl_seconds=self.config.cache_ttl_minutes * 60,
+        )
+        per_vacancy, errors = scrape_all_active(self.store, scraper)
+        for err in errors:
+            # Throttle block notices to at most one per hour.
+            hour_key = now.strftime("%Y-%m-%d %H")
+            if getattr(self, "_last_scrape_error_hour", None) != hour_key:
+                self._last_scrape_error_hour = hour_key
+                try:
+                    await send_to_recruiter(context, chat_id, f"Jiji blocked, retrying later: {err}", self.config.admin_chat_id)
+                except Exception:  # noqa: BLE001 - notify failure must not kill the loop
+                    pass
+        for vid, new_links in per_vacancy.items():
+            v = self.store.get_vacancy(vid)
+            if v is None or not new_links:
+                continue
+            if self._quiet_now() or not v.live_push:
+                continue
+            immediate: list[dict] = []
+            batched_due: list[dict] = []
+            for ln in new_links:
+                imm, due = self.live_queue.add(vid, ln)
+                immediate.extend(imm)
+                batched_due.extend(due)
+            try:
+                if immediate:
+                    await self.send_live_push(context, chat_id, v.label(), immediate)
+                if batched_due:
+                    await self.send_live_push(context, chat_id, v.label(), batched_due)
+                time_due = self.live_queue.due_by_time(vid, now)
+                if time_due:
+                    await self.send_live_push(context, chat_id, v.label(), time_due)
+            except Exception:  # noqa: BLE001 - one failed push must not kill the loop
+                continue
+        # Morning to-do, once a day at the configured hour.
+        last_todo = self.store.get_setting("last_todo_date", "")
+        if should_send_todo(now, self.config.todo_hour, last_todo, self.school_mode):
+            try:
+                due = followups_due(self.store)
+                lines = [daily_todo(self.store)]
+                if due:
+                    lines.append("\nFollow-ups due:")
+                    for ln in due[:10]:
+                        lines.append(f"• #{ln['candidate_id']} {ln.get('name','')} — texted {ln.get('marked_at','')[:10]}")
+                await send_to_recruiter(context, chat_id, "\n".join(lines), self.config.admin_chat_id)
+                self.store.set_setting("last_todo_date", now.date().isoformat())
+            except Exception:  # noqa: BLE001 - to-do failure must not kill the loop
+                pass
+        return f"scraped {len(per_vacancy)} vacanc(ies), errors={len(errors)}"
+
+    async def autoscrape_loop(self, app) -> None:
+        """Background loop: 60s ticks; scrapes every SCRAPE_INTERVAL_MINUTES.
+
+        Started from post_init. The loop never exits on its own; any
+        unexpected error is swallowed per-tick so polling keeps running.
+        """
+        ctx = SimpleNamespace(bot=app.bot)
+        while True:
+            try:
+                await asyncio.sleep(60)
+                now = datetime.now()
+                last = getattr(self, "_last_autoscrape", None)
+                if last is None or (now - last).total_seconds() >= self.config.scrape_interval_minutes * 60:
+                    self._last_autoscrape = now
+                    await self.run_scheduled_tasks(ctx)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - background loop must never crash polling
+                continue
+
     def build_application(self):
         from telegram import BotCommand, Update
         from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, ConversationHandler, MessageHandler, filters
 
         async def post_init(app):
             # Commands menu she sees when she types "/" or taps the menu button.
-            # Kept to the 16 she actually needs — the rest still work by typing.
+            # Kept to the ones she actually needs — the rest still work by typing.
             await app.bot.set_my_commands([
                 BotCommand("start", "Start the bot"),
                 BotCommand("help", "Show all commands"),
@@ -761,12 +1223,24 @@ class JobilateBot:
                 BotCommand("stop", "Stop a vacancy"),
                 BotCommand("status", "See bot status"),
                 BotCommand("school", "School / busy mode"),
+                BotCommand("howto", "How to use the bot"),
+                BotCommand("scrape", "Scrape Jiji now"),
+                BotCommand("keyboard", "Show or hide bottom buttons"),
             ])
+            # ADDITIVE: background auto-scrape + morning to-do loop.
+            asyncio.create_task(b.autoscrape_loop(app))
 
         app = ApplicationBuilder().token(self.config.bot_token).post_init(post_init).build()
         b = self
         conv = ConversationHandler(
-            entry_points=[CommandHandler("newvacancy", b.newvacancy_entry)],
+            # ADDITIVE aliases: /newvacancies + /addvacancy work exactly
+            # like /newvacancy. Entry via the ➕ inline button too.
+            entry_points=[
+                CommandHandler("newvacancy", b.newvacancy_entry),
+                CommandHandler("newvacancies", b.newvacancy_entry),
+                CommandHandler("addvacancy", b.newvacancy_entry),
+                CallbackQueryHandler(b.newvacancy_entry_from_button, pattern="^nav:newvacancy$"),
+            ],
             states={
                 ROLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, b.newvacancy_role)],
                 LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, b.newvacancy_location)],
@@ -775,11 +1249,19 @@ class JobilateBot:
                 EMPLOYER: [MessageHandler(filters.TEXT & ~filters.COMMAND, b.newvacancy_employer)],
                 DEADLINE: [MessageHandler(filters.TEXT & ~filters.COMMAND, b.newvacancy_deadline)],
                 CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, b.newvacancy_contact)],
-                CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, b.newvacancy_confirm)],
+                CONFIRM: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, b.newvacancy_confirm),
+                    CallbackQueryHandler(b.newvacancy_confirm_button, pattern="^vacsave:"),
+                ],
             },
             fallbacks=[CommandHandler("cancel", b.newvacancy_cancel)],
+            # ADDITIVE: re-sending /newvacancy while already in the wizard
+            # restarts the wizard instead of going quiet.
+            allow_reentry=True,
         )
         app.add_handler(conv)
+        # ADDITIVE: /cancel works globally (also outside a conversation).
+        app.add_handler(CommandHandler("cancel", b.newvacancy_cancel))
         simple = {
             "start": b.cmd_start, "help": b.cmd_help, "vacancies": b.cmd_vacancies,
             "vacancy": b.cmd_vacancy, "edit": b.cmd_edit, "delete": b.cmd_delete,
@@ -795,6 +1277,8 @@ class JobilateBot:
             "harvest": b.cmd_harvest, "dump": b.cmd_dump, "todo": b.cmd_todo,
             "school": b.cmd_school, "demo": b.cmd_demo, "mark": b.cmd_mark,
             "checklist": b.cmd_checklist,
+            # ADDITIVE commands.
+            "howto": b.cmd_howto, "keyboard": b.cmd_keyboard, "scrape": b.cmd_scrape,
         }
         # /start is both a vacancy command and the welcome command; the
         # welcome handler wins for bare /start, vacancy start uses /start <id>.
@@ -805,4 +1289,8 @@ class JobilateBot:
             app.add_handler(CommandHandler(name, fn))
         # /start <id> activates a vacancy: handled inside cmd_start via args.
         app.add_handler(CallbackQueryHandler(b.on_callback))
+        # ADDITIVE: plain-text handler (reply-keyboard buttons, just-paste).
+        # Registered AFTER the conversation, so wizard messages are
+        # consumed by the ConversationHandler first and never reach here.
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, b.handle_plaintext))
         return app

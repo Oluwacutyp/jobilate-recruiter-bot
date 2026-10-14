@@ -3,9 +3,34 @@
 Hello! This bot helps you find CVs. It never texts candidates.
 You text them yourself. That never changes.
 
+## 0. You don't need to memorise commands
+
+Tap the buttons at the bottom of the chat — Add Vacancy, My Vacancies,
+Harvest, To-Do, Status, How to use. Tapping one is the same as typing
+its command. `/keyboard off` hides those bottom buttons; `/keyboard on`
+brings them back.
+
+Need the full guide inside Telegram? Send `/howto`.
+
 ## 1. Add a vacancy
 
-Send `/newvacancy` to the bot.
+Send `/newvacancy` to the bot. `/newvacancies` and `/addvacancy` work
+too — same thing.
+
+**Easiest way:** just paste the vacancy as a plain message, with no
+command at all. The bot will ask "Is this a new vacancy?" — tap Yes.
+You can paste it exactly like this:
+
+> JOB VACANCY: SALES SUPERVISOR
+> Industry: Agro-Pharmaceuticals
+> Location: Lagos State
+> Salary: ₦500,000+monthly
+> Employment Type: Full-Time
+> Requirements: ...
+
+The bot reads it, shows you what it understood, and you tap ✅ YES
+to save (or type YES — both work). If you get stuck in the wizard,
+send `/cancel` and start again. Sending `/newvacancy` again restarts it.
 
 The bot will ask you, one step at a time:
 
@@ -27,7 +52,9 @@ send it as text. It cannot read photos. Just type or paste the text.
 
 ## 2. Read a candidate card
 
-When the bot finds a CV, it sends you a card like this:
+The bot scrapes Jiji by itself about every 30 minutes and sends you
+new matches automatically — you don't have to ask. `/scrape` makes it
+scrape right now. When the bot finds a CV, it sends you a card like this:
 
 > Tier1 · Adaeze — Sales Supervisor
 > Phone number · Lagos State
@@ -117,7 +144,8 @@ If you only need the quick list, just open the CSV — no unzipping needed.
 
 ## 9. Daily to-do
 
-Send `/todo` any morning. It shows:
+The bot sends you the to-do by itself every morning at 8am (unless
+school mode is on). Send `/todo` any time to see it again. It shows:
 
 - New candidates to review
 - People you have not texted yet

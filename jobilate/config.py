@@ -16,6 +16,9 @@ class Config:
     cache_ttl_minutes: int = 15
     live_batch_minutes: int = 5
     live_batch_size: int = 5
+    # ADDITIVE (2026-10-14): auto-scrape loop + morning to-do.
+    scrape_interval_minutes: int = 30
+    todo_hour: int = 8
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -41,6 +44,8 @@ class Config:
             cache_ttl_minutes=_int("CACHE_TTL_MINUTES", 15),
             live_batch_minutes=_int("LIVE_BATCH_MINUTES", 5),
             live_batch_size=_int("LIVE_BATCH_SIZE", 5),
+            scrape_interval_minutes=_int("SCRAPE_INTERVAL_MINUTES", 30),
+            todo_hour=_int("TODO_HOUR", 8),
         )
 
     def validate(self, need_token: bool = True) -> list[str]:
@@ -55,6 +60,10 @@ class Config:
             problems.append("QUIET_HOURS_END must be 0-23")
         if self.scrape_min_delay_seconds < 3.0:
             problems.append("SCRAPE_MIN_DELAY_SECONDS must be >= 3")
+        if not (5 <= self.scrape_interval_minutes <= 1440):
+            problems.append("SCRAPE_INTERVAL_MINUTES must be 5-1440")
+        if not (0 <= self.todo_hour <= 23):
+            problems.append("TODO_HOUR must be 0-23")
         return problems
 
     @property

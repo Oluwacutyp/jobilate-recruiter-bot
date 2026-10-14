@@ -9,12 +9,19 @@ Think of it as a template. We only have to be changing the job openings when nec
 
 ## How to use am
 
-**1. Upload vacancy**
-Send `/newvacancy` to the bot.
-E go ask you one by one: role, location, pay, requirements, employer, deadline, contact.
-Or you fit paste the whole vacancy at once. E go read am, show you wetin e understand, you go reply YES to save.
+**0. You no need memorize commands**
+Tap the buttons for bottom of the chat — Add Vacancy, My Vacancies, Harvest, To-Do, Status, How to use. Tap one, na same as typing the command.
+If you need full guide inside Telegram, send `/howto`.
 
-**2. Bot go send you cards as e find new ones**
+**1. Upload vacancy**
+Send `/newvacancy` to the bot. `/newvacancies` and `/addvacancy` na same thing.
+E go ask you one by one: role, location, pay, requirements, employer, deadline, contact.
+Or you fit paste the whole vacancy at once. E go read am, show you wetin e understand, you go tap ✅ YES to save (or type YES — both work).
+Easiest: just paste the vacancy as normal message, no command. Bot go ask "Is this a new vacancy?" — tap Yes.
+If you get stuck for wizard, send `/cancel` and start again. If you send `/newvacancy` again, e go restart wizard.
+
+**2. Bot go send you cards as e find new ones — by itself**
+Bot go dey scrape Jiji by itself every 30 minutes and send you new matches automatically — you no need ask. `/scrape` go make am scrape now now.
 As e see new CV wey match, e go send you card + the person CV file (na .txt, e go open for your phone).
 Card go show: Tier1, name, phone number, location, why e match, CV link.
 Tier1 na strong match. Tier2 na good for one side. Tier3 na vague — still look am after Tier1 and Tier2.
@@ -67,7 +74,8 @@ Bot no go disturb you for night. Default na 10pm to 7am.
 If you dey school or you need break, use am. No wahala.
 
 **9. Daily to-do**
-Send `/todo` for morning. E go show you:
+Bot go send you to-do by itself every morning for 8am (unless school mode dey on).
+Send `/todo` any time to see am again. E go show you:
 New people to review, people you never text yet, follow-ups wey don due.
 
 **10. If something look wrong**

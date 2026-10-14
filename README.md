@@ -60,10 +60,35 @@ How to unzip:
 
 ## Commands
 
-See `/help` in the bot, or `SPEC.md`. Highlights:
-`/newvacancy` (wizard or paste) · `/vacancies` · `/start|/stop|/pause|/resume <id>` ·
+Bare `/help` shows the short list; `/help all` shows everything.
+See `SPEC.md` for the full list. Highlights:
+`/newvacancy` (wizard or paste; aliases `/newvacancies`, `/addvacancy`) · `/vacancies` · `/start|/stop|/pause|/resume <id>` ·
 `/candidates <id>` · `/mark <vacancy> <candidate> <Texted|Interested|No reply|Not fit|Sent to employer>` ·
-`/harvest [vacancy|unsent|unsent_employer|all]` · `/dump` · `/export` · `/todo` · `/school on|off`
+`/harvest [vacancy|unsent|unsent_employer|all]` · `/dump` · `/export` · `/todo` · `/school on|off` ·
+`/howto` (full guide in-chat) · `/scrape [id]` (scrape Jiji now) · `/keyboard on|off` (bottom buttons) · `/cancel` (exit the wizard)
+
+## Easy ways to use it (no commands to memorise)
+
+- **Buttons:** `/start` shows inline buttons (Add Vacancy, My Vacancies,
+  Harvest, To-Do, How to use). The bottom of the chat always has the
+  reply-keyboard buttons: Add Vacancy · My Vacancies · Harvest · To-Do ·
+  Status · How to use. Tapping one is the same as typing its command.
+  `/keyboard off` hides the bottom buttons; `/keyboard on` brings them back.
+- **Just paste:** paste a vacancy as a plain message with no command —
+  the bot asks "Is this a new vacancy?" with Yes/No buttons.
+- **YES / NO buttons:** vacancy drafts show ✅ YES / ❌ NO buttons.
+  Typing YES / NO still works exactly as before.
+- **Auto-scrape (default ON):** every `SCRAPE_INTERVAL_MINUTES` (default
+  30), the bot scrapes ACTIVE vacancies on Jiji by itself and pushes new
+  matches to the recruiter chat (Tier1 immediately, rest batched).
+  It respects quiet hours, school mode, and per-vacancy `/live` on/off.
+  `/scrape [id]` triggers a scrape right now. `/demo` still exists for
+  a demo match against sample CVs (no scraping).
+- **Morning to-do (default 08:00):** the bot sends the daily to-do by
+  itself once a day (new + follow-ups due), unless school mode is on.
+  Change the hour with `/set todo_hour <0-23>`. `/todo` still works.
+- **Re-sending `/newvacancy` while in the wizard** restarts the wizard
+  instead of going quiet. `/cancel` always exits the wizard.
 
 ## Windows RDP deploy
 
@@ -93,6 +118,8 @@ No candidate messaging exists on any platform.
 | `QUIET_HOURS_START` / `QUIET_HOURS_END` | No live pushes in this window (default 22–07) |
 | `SCRAPE_MIN_DELAY_SECONDS` | ≥3s between Jiji page loads |
 | `CACHE_TTL_MINUTES` | Jiji page cache (default 15) |
+| `SCRAPE_INTERVAL_MINUTES` | Auto-scrape loop interval (default 30, min 5) |
+| `TODO_HOUR` | Hour the morning to-do is auto-sent (default 8) |
 
 ## Layout
 
