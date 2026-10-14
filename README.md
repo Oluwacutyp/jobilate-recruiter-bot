@@ -90,6 +90,32 @@ See `SPEC.md` for the full list. Highlights:
 - **Re-sending `/newvacancy` while in the wizard** restarts the wizard
   instead of going quiet. `/cancel` always exits the wizard.
 
+## Turnstile fallback (Playwright) — bot clicks "Verify you're human" itself
+
+Jiji sometimes returns a Cloudflare Turnstile "Verify you're human"
+checkbox page (HTTP 403) to the bot's `requests` fetches. The bot
+tries `requests` first (fast, polite). On a challenge/block page it
+falls back ONCE per URL to a real Chromium that clicks the checkbox
+(a real browser click — no solving services, no token forgery) and
+returns the resulting HTML, so the existing parsers work unchanged.
+
+Why solving it in Chrome does NOT unblock the bot: Chrome and the
+bot have separate cookies/fingerprints. The bot's own persistent
+browser profile (`DATA_DIR/browser_profile`) holds the verified
+session across runs — first run may need to verify, later runs reuse it.
+
+Windows RDP steps (one-time):
+```powershell
+pip install -r requirements.txt
+playwright install chromium
+```
+Then `git pull`, restart the bot, and `/scrape 1` to retry. If the
+challenge still shows, wait + retry — the bot never retries
+aggressively and never fakes results. Set `PLAYWRIGHT_ENABLED=0`
+in `.env` to disable the fallback (requests only). `PLAYWRIGHT_HEADLESS`
+defaults to headed (0) on Windows for the best Turnstile pass rate,
+headless (1) elsewhere. See `/config` and `/limits` in the bot.
+
 ## Windows RDP deploy
 
 1. On the Windows host: install Python 3.11+ (tick "Add python to PATH").
@@ -118,6 +144,9 @@ No candidate messaging exists on any platform.
 | `QUIET_HOURS_START` / `QUIET_HOURS_END` | No live pushes in this window (default 22–07) |
 | `SCRAPE_MIN_DELAY_SECONDS` | ≥3s between Jiji page loads |
 | `CACHE_TTL_MINUTES` | Jiji page cache (default 15) |
+| `PLAYWRIGHT_ENABLED` | Turnstile browser fallback (default 1, 0 = requests only) |
+| `PLAYWRIGHT_HEADLESS` | 0 = headed (default on Windows), 1 = headless |
+| `BROWSER_PROFILE_DIR` | Verified browser session (default `DATA_DIR/browser_profile`) |
 | `SCRAPE_INTERVAL_MINUTES` | Auto-scrape loop interval (default 30, min 5) |
 | `TODO_HOUR` | Hour the morning to-do is auto-sent (default 8) |
 
