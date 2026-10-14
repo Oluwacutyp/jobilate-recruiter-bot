@@ -151,6 +151,18 @@ def build_search_query(vacancy_title: str, category: str, location: str = "") ->
     return " ".join(parts)[:120]
 
 
+def build_global_search_query(vacancy_title: str, location: str = "") -> str:
+    """Global catch-all query: '<short title> <location>', NO category, ≤120 chars.
+
+    Hits the global seeking-work-cvs listing, which spans ALL categories,
+    so a qualified candidate posted outside the expected categories is
+    still found. Matching stays category-agnostic (scores by
+    education/years/skills/location, not by category), so global hits are
+    scored exactly like category hits.
+    """
+    return build_search_query(vacancy_title, "", location)
+
+
 def short_vacancy_label(vacancy) -> str:
     """Short label for error messages: '#<id> <short title>'."""
     vid = getattr(vacancy, "id", "?")
@@ -229,13 +241,46 @@ def scrape_one_vacancy(store, vacancy, scraper, max_cards: int = 20) -> tuple[li
                 continue
             if len(cards) >= max_cards:
                 break
+        # Global catch-all pass (ADDITIVE 2026-10-14): category searches
+        # miss qualified candidates posted outside the expected
+        # categories (e.g. a B.Tech + 5y vet-drug-sales CV posted under
+        # "Management" or "General"). One global search (title +
+        # location, NO category) spans ALL categories. It runs AFTER the
+        # category passes (most relevant first), counts toward the SAME
+        # max_cards cap (skipped when already reached), reuses the same
+        # fetch/parse/scoring/dedup, and follows the same resilience:
+        # 0-results -> done, real block -> abort, no hammering. No
+        # hardcoded adjacent-category list — the global search IS the
+        # dynamic catch-all.
+        if block_error is None and len(cards) < max_cards:
+            try:
+                global_url = scraper.search_url(
+                    build_global_search_query(search_title, vacancy.location)
+                )
+                global_html = scraper.fetch(global_url)
+                global_cards = scraper.parse_cv_list_html(global_html)
+                seen_global: set[str] = {c.get("cv_url", "") for c in cards}
+                for gc in global_cards:
+                    if gc.get("cv_url", "") not in seen_global:
+                        cards.append(gc)
+                        seen_global.add(gc.get("cv_url", ""))
+            except JijiScrapeError as exc:
+                if _is_block_error(str(exc)):
+                    # Real block on the global pass: keep category cards
+                    # if any; only surface as the error when no cards.
+                    if not cards:
+                        block_error = str(exc)
+                else:
+                    structure_errors.append(str(exc))
+            except Exception as exc:  # noqa: BLE001 - global pass must not kill category results
+                structure_errors.append(f"Scrape failed for {short_vacancy_label(vacancy)}: {exc}")
         if not cards:
             if block_error is not None:
                 return [], truncate_error(block_error)
             if structure_errors:
                 return [], truncate_error(structure_errors[0])
-            # Every category returned 0 results (parse returned []) ->
-            # no new candidates, NOT an error.
+            # Every category + the global pass returned 0 results
+            # (parse returned []) -> no new candidates, NOT an error.
             return [], None
         seen_urls: set[str] = set()
         for card in cards[:max_cards]:

@@ -58,7 +58,9 @@ send it as text. It cannot read photos. Just type or paste the text.
 
 The bot scrapes Jiji by itself about every 30 minutes and sends you
 new matches automatically — you don't have to ask. `/scrape` makes it
-scrape right now. When the bot finds a CV, it sends you a card like this:
+scrape right now. The bot also checks outside the usual categories —
+someone who fits but posted elsewhere still shows up. When the bot
+finds a CV, it sends you a card like this:
 
 > Tier1 · Adaeze — Sales Supervisor
 > Phone number · Lagos State

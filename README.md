@@ -144,6 +144,15 @@ Two behaviours that matter:
   immediately — no hammering. Other per-category failures are collected;
   they only surface if NO category yields cards. All-categories-0-results
   reports "No new matches", not "Jiji blocked".
+- **Global catch-all pass.** After the category passes, the bot runs ONE
+  global search — query = short title + location, NO category — which
+  spans ALL Jiji categories. A qualified candidate posted outside the
+  expected categories (e.g. a B.Tech + 5y vet-drug-sales CV under
+  "Management") is still found. Global hits are scored with the same
+  matching (category-agnostic), deduped against category hits, and
+  count toward the SAME max-cards-per-vacancy cap (skipped when the cap
+  is already reached). No hardcoded adjacent-category list — the global
+  search is the dynamic catch-all.
 - **Browser wait.** The Playwright fallback waits up to 10s for the
   card selector (`a.qa-advert-list-item, a[href*='-cvs/']`) so JS-rendered
   cards are present before the HTML is returned; 0-results pages return
