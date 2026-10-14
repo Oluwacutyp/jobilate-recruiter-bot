@@ -123,6 +123,35 @@ browser fallback — in `asyncio.to_thread` (a worker thread with no
 running loop) via `scrape_one_vacancy_async` / `scrape_all_active_async`
 / `JijiScraper.fetch_async`. Sync callers keep the sync versions.
 
+## How Jiji pages are parsed (current structure, verified live 2026-10-14)
+
+Jiji is a Nuxt app. Listing pages are server-rendered HTML: result
+cards are `<a class="... qa-advert-list-item ...">` with hrefs like
+`/<location>/<category>-cvs/<slug>-<id>.html?indexPosition=N`
+(e.g. `/odeda/farming-and-veterinary-cvs/farm-manager-....html`).
+The parser (`parse_cv_list_html`) prefers these card-shaped anchors.
+The old generic fallback (any jiji.ng / relative link with text) is
+kept for other listing layouts — nothing was deleted.
+
+Two behaviours that matter:
+- **0-results pages are NOT errors.** A search with no matches
+  ("0 results for ...") legitimately has no card anchors — only home +
+  Login/Registration links, which are never counted as cards. The parser
+  returns `[]`, and the scrape loop moves on to the NEXT category
+  instead of aborting the whole vacancy (one category returning 0
+  results must not hide another category's 47 results).
+- **Per-category resilience.** A real block (challenge/403/503) aborts
+  immediately — no hammering. Other per-category failures are collected;
+  they only surface if NO category yields cards. All-categories-0-results
+  reports "No new matches", not "Jiji blocked".
+- **Browser wait.** The Playwright fallback waits up to 10s for the
+  card selector (`a.qa-advert-list-item, a[href*='-cvs/']`) so JS-rendered
+  cards are present before the HTML is returned; 0-results pages return
+  immediately (no wait burned). If no cards are found and the page is
+  not a 0-results page, the error includes a SHORT diagnostic
+  (`diag: title=... anchors=N html_len=N flags=...`) — no full HTML,
+  no PII — so the Telegram message says WHAT page was fetched.
+
 ## If a vacancy title got saved as full text
 
 On an older version, pasting a full vacancy as the wizard's Step 1

@@ -74,6 +74,30 @@ def _page_looks_blocked(html: str) -> bool:
     return "verify you are human" in low or "verify you're human" in low
 
 
+# Selector for Jiji CV result cards (verified against live HTML 2026-10-14).
+CARD_SELECTOR = "a.qa-advert-list-item, a[href*='-cvs/']"
+
+
+def _wait_for_cards(page, html: str, timeout_ms: int = 10000) -> str:
+    """Wait for JS-rendered CV cards before returning HTML (ADDITIVE).
+
+    Jiji is a Nuxt app: ``domcontentloaded`` HTML can precede the
+    rendered cards. If the page already says "0 results" / "No results"
+    it legitimately has no cards — return immediately, don't burn the
+    timeout. On wait timeout (or a fake page without wait_for_selector
+    in tests) return the current HTML; the parser decides (0-results
+    -> [], no cards -> diagnostic error). Never raises.
+    """
+    try:
+        low = (html or "").lower()
+        if "0 results" in low or "no results" in low:
+            return html
+        page.wait_for_selector(CARD_SELECTOR, timeout=timeout_ms)
+        return page.content()
+    except Exception:  # noqa: BLE001 - wait failure must not kill the fetch
+        return html
+
+
 def _truncate_url(url: str, limit: int = 120) -> str:
     """Truncate a URL for error messages (local copy — avoids a top-level
     circular import with scraper; scraper.truncate_url is identical)."""
@@ -165,6 +189,9 @@ def fetch_with_browser(
                         html = page.content()
                 else:
                     html = page.content()
+                # ADDITIVE (2026-10-14): cards may render via JS after
+                # domcontentloaded — wait for them before returning HTML.
+                html = _wait_for_cards(page, html)
                 if _page_looks_blocked(html):
                     raise JijiScrapeError(
                         f"Still blocked after browser fetch for {_truncate_url(url)} "

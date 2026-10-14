@@ -157,6 +157,15 @@ def short_vacancy_label(vacancy) -> str:
     return f"#{vid} {short_search_title(getattr(vacancy, 'title', ''))}"
 
 
+def _is_block_error(msg: str) -> bool:
+    """True for real Jiji block/challenge errors (abort, don't hammer)."""
+    low = (msg or "").lower()
+    return any(
+        token in low
+        for token in ("challenge", "403", "503", "blocked", "turnstile", "verify you are human", "verify you're human")
+    )
+
+
 def truncate_error(err: str | None, limit: int = 500) -> str | None:
     """Cap an error string for Telegram (full cause stays in logs)."""
     if err is None:
@@ -196,17 +205,38 @@ def scrape_one_vacancy(store, vacancy, scraper, max_cards: int = 20) -> tuple[li
     try:
         categories = categories_for_title(search_title)
         cards: list[dict] = []
+        # Per-category resilience (2026-10-14): one category returning
+        # 0 results must NOT kill the whole vacancy — the next category
+        # may have results (verified live: "farming & veterinary +
+        # Lagos" -> 0 results, "sales + Lagos" -> 47 results). A real
+        # block aborts immediately (no point hammering); structure
+        # errors are collected and only surface if NO category yields cards.
+        block_error: str | None = None
+        structure_errors: list[str] = []
         for cat in categories:
             try:
                 url = scraper.search_url(build_search_query(search_title, cat, vacancy.location))
                 html = scraper.fetch(url)
                 cards.extend(scraper.parse_cv_list_html(html))
-            except JijiScrapeError:
-                raise
+            except JijiScrapeError as exc:
+                if _is_block_error(str(exc)):
+                    block_error = str(exc)
+                    break
+                structure_errors.append(str(exc))
+                continue
             except Exception as exc:  # noqa: BLE001 - one category failing must not kill the run
-                return [], truncate_error(f"Scrape failed for {short_vacancy_label(vacancy)}: {exc}")
+                structure_errors.append(f"Scrape failed for {short_vacancy_label(vacancy)}: {exc}")
+                continue
             if len(cards) >= max_cards:
                 break
+        if not cards:
+            if block_error is not None:
+                return [], truncate_error(block_error)
+            if structure_errors:
+                return [], truncate_error(structure_errors[0])
+            # Every category returned 0 results (parse returned []) ->
+            # no new candidates, NOT an error.
+            return [], None
         seen_urls: set[str] = set()
         for card in cards[:max_cards]:
             url = card.get("cv_url", "")

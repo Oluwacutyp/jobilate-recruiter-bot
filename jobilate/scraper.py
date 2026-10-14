@@ -53,6 +53,81 @@ def truncate_error_text(text: str, limit: int = 500) -> str:
     return text[:limit] + "..."
 
 
+# CV-card anchor shape (verified against live Jiji HTML 2026-10-14).
+# Example: /odeda/farming-and-veterinary-cvs/farm-manager-<id>.html?indexPosition=0
+_CV_CARD_HREF_RE = re.compile(r"-cvs/[^\"']*\.html", re.I)
+_CV_CARD_CLASSES = ("qa-advert-list-item", "b-list-advert")
+
+
+def _looks_like_cv_card_anchor(a) -> bool:
+    """True for anchors shaped like Jiji CV result cards."""
+    href = a.get("href", "") or ""
+    if _CV_CARD_HREF_RE.search(href):
+        return True
+    classes = " ".join(a.get("class", []) or [])
+    return any(c in classes for c in _CV_CARD_CLASSES)
+
+
+def _anchors_to_cards(anchors) -> list[dict]:
+    """Anchors -> [{title, cv_url}] (text len >= 3), deduped, order kept."""
+    cards: list[dict] = []
+    for a in anchors:
+        href = a.get("href", "") or ""
+        text = " ".join(a.get_text(" ", strip=True).split())
+        if len(text) < 3:
+            continue
+        url = href if href.startswith("http") else JIJI_BASE + href
+        cards.append({"title": text, "cv_url": url})
+    return _dedupe_cards(cards)
+
+
+def _dedupe_cards(cards: list[dict]) -> list[dict]:
+    seen, out = set(), []
+    for c in cards:
+        if c["cv_url"] not in seen:
+            seen.add(c["cv_url"])
+            out.append(c)
+    return out
+
+
+def _page_diagnostic(html: str, soup) -> str:
+    """SHORT diagnostic for no-cards errors: page title + flags only.
+
+    Never includes HTML, URLs, or candidate text (no PII). Tells the
+    recruiter WHAT page was fetched (challenge? empty? 0-results?)
+    instead of just "structure changed".
+    """
+    title = ""
+    try:
+        if soup.title:
+            title = " ".join(soup.title.get_text(" ", strip=True).split())[:200]
+    except Exception:  # noqa: BLE001 - diagnostic must never raise
+        title = ""
+    try:
+        low = soup.get_text(" ", strip=True).lower()
+    except Exception:  # noqa: BLE001 - diagnostic must never raise
+        low = ""
+    flags = []
+    if "verify you are human" in low or "verify you're human" in low:
+        flags.append("verify-human")
+    if "challenge" in low:
+        flags.append("challenge")
+    if "0 results" in low:
+        flags.append("0-results")
+    if "no results" in low:
+        flags.append("no-results")
+    if "captcha" in low:
+        flags.append("captcha")
+    try:
+        anchors = len(soup.find_all("a", href=True))
+    except Exception:  # noqa: BLE001 - diagnostic must never raise
+        anchors = -1
+    return (
+        f"diag: title={title!r} anchors={anchors} "
+        f"html_len={len(html or '')} flags={','.join(flags) or 'none'}"
+    )
+
+
 def _is_challenge_text(text: str) -> bool:
     low = (text or "").lower()
     return ("challenge" in low[:2000] and "cloudflare" in low[:2000]) or (
@@ -157,14 +232,38 @@ class JijiScraper:
     def parse_cv_list_html(self, html: str) -> list[dict]:
         """Extract CV card links from a listing page.
 
-        Listing cards are <a> tags whose href points at jiji.ng.
-        Fails fast when no cards are found (structure change), instead
-        of silently returning 'no CVs'.
+        Card detection (verified against live Jiji HTML 2026-10-14):
+        result cards are <a> tags with class ``qa-advert-list-item`` /
+        ``b-list-advert-*`` and hrefs like
+        ``/<location>/<category>-cvs/<slug>-<id>.html?indexPosition=N``.
+
+        Order (ADDITIVE — the old generic fallback is kept, not deleted):
+        1. Card-shaped anchors -> return them.
+        2. A page that says "0 results" / "No results" with no card
+           anchors is a legitimate empty search -> return [] (NOT an
+           error), so the caller can try the next category instead of
+           aborting the whole vacancy.
+        3. Legacy generic fallback: any jiji.ng / relative link with
+           text (kept for listing layouts that don't use card classes).
+        4. Otherwise raise with a SHORT diagnostic (page title + flags),
+           never the full HTML and never PII.
         """
         if BeautifulSoup is None:
             raise JijiScrapeError("beautifulsoup4 is not installed")
         soup = BeautifulSoup(html, "html.parser")
-        cards: list[dict] = []
+        # 1. Card-shaped anchors first.
+        cards = _anchors_to_cards(
+            [a for a in soup.find_all("a", href=True) if _looks_like_cv_card_anchor(a)]
+        )
+        if cards:
+            return cards
+        # 2. Legitimate empty search -> [] so the caller tries the next category.
+        visible = soup.get_text(" ", strip=True)
+        low_visible = visible.lower()
+        if "0 results" in low_visible or "no results" in low_visible:
+            return []
+        # 3. Legacy generic fallback (kept intact).
+        legacy: list[dict] = []
         for a in soup.find_all("a", href=True):
             href = a["href"]
             if "jiji.ng" not in href and not href.startswith("/"):
@@ -176,16 +275,15 @@ class JijiScraper:
             if "/seeking-work" not in url and "-cv" not in url and "cv" not in url.lower():
                 # Still keep jiji.ng links: listing pages vary; title text decides.
                 pass
-            cards.append({"title": text, "cv_url": url})
-        # Dedupe by URL, keep order.
-        seen, out = set(), []
-        for c in cards:
-            if c["cv_url"] not in seen:
-                seen.add(c["cv_url"])
-                out.append(c)
-        if not out:
-            raise JijiScrapeError("Jiji page structure changed: no CV cards found (no jiji.ng links)")
-        return out
+            legacy.append({"title": text, "cv_url": url})
+        out = _dedupe_cards(legacy)
+        if out:
+            return out
+        # 4. Truly no cards -> fail fast WITH a diagnostic.
+        raise JijiScrapeError(
+            "Jiji page structure changed: no CV cards found (no jiji.ng links). "
+            + _page_diagnostic(html, soup)
+        )
 
     def parse_cv_detail_html(self, html: str, url: str = "") -> dict:
         """Parse one CV detail page into structured fields."""
