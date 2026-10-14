@@ -116,6 +116,28 @@ in `.env` to disable the fallback (requests only). `PLAYWRIGHT_HEADLESS`
 defaults to headed (0) on Windows for the best Turnstile pass rate,
 headless (1) elsewhere. See `/config` and `/limits` in the bot.
 
+Implementation note: the Playwright Sync API cannot run on the
+Telegram bot's asyncio event-loop thread ("Sync API inside the asyncio
+loop"). The bot therefore runs the whole sync scrape — including the
+browser fallback — in `asyncio.to_thread` (a worker thread with no
+running loop) via `scrape_one_vacancy_async` / `scrape_all_active_async`
+/ `JijiScraper.fetch_async`. Sync callers keep the sync versions.
+
+## If a vacancy title got saved as full text
+
+On an older version, pasting a full vacancy as the wizard's Step 1
+answer saved the WHOLE paste as the title, which produced giant search
+URLs. The parser/wizard now treat a multi-line Step 1 paste as a pasted
+vacancy (draft + confirm), and search queries use only the short
+first-line title (≤120 chars). The DB is NOT auto-migrated — if an old
+vacancy still has a full-text title, fix it with:
+```
+/vacancy 1
+/edit 1 title=Sales Supervisor
+```
+then `/scrape 1` to retry. Error messages never include the full URL
+— only the first 120 chars + "...".
+
 ## Windows RDP deploy
 
 1. On the Windows host: install Python 3.11+ (tick "Add python to PATH").

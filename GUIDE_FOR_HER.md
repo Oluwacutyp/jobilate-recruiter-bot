@@ -32,6 +32,10 @@ The bot reads it, shows you what it understood, and you tap ✅ YES
 to save (or type YES — both work). If you get stuck in the wizard,
 send `/cancel` and start again. Sending `/newvacancy` again restarts it.
 
+Tip: if you paste a full vacancy when it asks for the role (Step 1),
+the bot reads it as a vacancy and shows you the draft — it won't save
+the whole paste as the title.
+
 The bot will ask you, one step at a time:
 
 1. Role — example: `Sales Supervisor`

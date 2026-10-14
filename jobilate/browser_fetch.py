@@ -74,6 +74,15 @@ def _page_looks_blocked(html: str) -> bool:
     return "verify you are human" in low or "verify you're human" in low
 
 
+def _truncate_url(url: str, limit: int = 120) -> str:
+    """Truncate a URL for error messages (local copy — avoids a top-level
+    circular import with scraper; scraper.truncate_url is identical)."""
+    url = url or ""
+    if len(url) <= limit:
+        return url
+    return url[:limit] + "..."
+
+
 def fetch_with_browser(
     url: str,
     *,
@@ -148,7 +157,7 @@ def fetch_with_browser(
                         else:
                             raise JijiScrapeError(
                                 "Turnstile checkbox clicked but challenge did not clear "
-                                f"within {timeout_seconds}s for {url}."
+                                f"within {timeout_seconds}s for {_truncate_url(url)}."
                             )
                     else:
                         # No clickable checkbox found — return what we got;
@@ -158,7 +167,7 @@ def fetch_with_browser(
                     html = page.content()
                 if _page_looks_blocked(html):
                     raise JijiScrapeError(
-                        f"Still blocked after browser fetch for {url} "
+                        f"Still blocked after browser fetch for {_truncate_url(url)} "
                         "(Turnstile challenge still present). Try again later."
                     )
                 return html
@@ -170,4 +179,34 @@ def fetch_with_browser(
     except JijiScrapeError:
         raise
     except Exception as exc:
-        raise JijiScrapeError(f"Browser fetch failed for {url}: {exc}") from exc
+        raise JijiScrapeError(
+            f"Browser fetch failed for {_truncate_url(url)}: {str(exc)[:300]}"
+        ) from exc
+
+
+async def fetch_with_browser_async(
+    url: str,
+    *,
+    profile_dir: str | None = None,
+    data_dir: str = "./data",
+    timeout_seconds: int = 30,
+    _playwright_factory=None,
+) -> str:
+    """Async-safe browser fetch for Telegram handlers (async context).
+
+    The Playwright Sync API raises "Sync API inside the asyncio loop"
+    when called on the event-loop thread. Running the sync fetch in
+    ``asyncio.to_thread`` puts it on a worker thread with no running
+    loop, so the Sync API works. Sync callers keep using
+    ``fetch_with_browser``.
+    """
+    import asyncio
+
+    return await asyncio.to_thread(
+        fetch_with_browser,
+        url,
+        profile_dir=profile_dir,
+        data_dir=data_dir,
+        timeout_seconds=timeout_seconds,
+        _playwright_factory=_playwright_factory,
+    )

@@ -128,6 +128,46 @@ def should_send_todo(now: datetime, todo_hour: int, last_todo_date: str, school_
 
 
 # ---------------------------------------------------------------------------
+# Search-query sanitisation (2026-10-14): a vacancy title once got saved
+# as the FULL pasted vacancy text (multi-line, multi-KB). Building a
+# Jiji query from that produced a giant useless URL and a giant error
+# bubble. Search queries now use ONLY the short first-line title +
+# category + location, capped at 120 chars. NEVER raw_text/requirements.
+# ---------------------------------------------------------------------------
+def short_search_title(title: str) -> str:
+    """First line of a title, stripped, max 80 chars. Never multi-line."""
+    title = (title or "")
+    first = title.splitlines()[0].strip() if title.strip() else ""
+    return first[:80]
+
+
+def build_search_query(vacancy_title: str, category: str, location: str = "") -> str:
+    """Short Jiji query: '<short title> <category> <location>', ≤120 chars."""
+    parts = [short_search_title(vacancy_title)]
+    if (category or "").strip():
+        parts.append((category or "").strip())
+    if (location or "").strip():
+        parts.append((location or "").strip())
+    return " ".join(parts)[:120]
+
+
+def short_vacancy_label(vacancy) -> str:
+    """Short label for error messages: '#<id> <short title>'."""
+    vid = getattr(vacancy, "id", "?")
+    return f"#{vid} {short_search_title(getattr(vacancy, 'title', ''))}"
+
+
+def truncate_error(err: str | None, limit: int = 500) -> str | None:
+    """Cap an error string for Telegram (full cause stays in logs)."""
+    if err is None:
+        return None
+    err = str(err)
+    if len(err) <= limit:
+        return err
+    return err[:limit] + "..."
+
+
+# ---------------------------------------------------------------------------
 # Scraping one vacancy / all active vacancies (pure store + scraper).
 # ---------------------------------------------------------------------------
 def scrape_one_vacancy(store, vacancy, scraper, max_cards: int = 20) -> tuple[list[dict], str | None]:
@@ -141,8 +181,11 @@ def scrape_one_vacancy(store, vacancy, scraper, max_cards: int = 20) -> tuple[li
     from .scraper import JijiScrapeError
 
     existing_ids = {ln.get("candidate_id") for ln in store.links_for_vacancy(vacancy.id)}
+    # Sanitised title for BOTH search + scoring: a corrupted multi-line
+    # title must never leak into a query or into token overlap.
+    search_title = short_search_title(vacancy.title)
     vac = {
-        "title": vacancy.title,
+        "title": search_title,
         "location": vacancy.location,
         "pay_min": vacancy.pay_min,
         "requirements_text": vacancy.requirements_text,
@@ -151,17 +194,17 @@ def scrape_one_vacancy(store, vacancy, scraper, max_cards: int = 20) -> tuple[li
     }
     new_cids: set[int] = set()
     try:
-        categories = categories_for_title(vacancy.title)
+        categories = categories_for_title(search_title)
         cards: list[dict] = []
         for cat in categories:
             try:
-                url = scraper.search_url(f"{vacancy.title} {cat}")
+                url = scraper.search_url(build_search_query(search_title, cat, vacancy.location))
                 html = scraper.fetch(url)
                 cards.extend(scraper.parse_cv_list_html(html))
             except JijiScrapeError:
                 raise
             except Exception as exc:  # noqa: BLE001 - one category failing must not kill the run
-                return [], f"Scrape failed for {vacancy.label()}: {exc}"
+                return [], truncate_error(f"Scrape failed for {short_vacancy_label(vacancy)}: {exc}")
             if len(cards) >= max_cards:
                 break
         seen_urls: set[str] = set()
@@ -205,13 +248,26 @@ def scrape_one_vacancy(store, vacancy, scraper, max_cards: int = 20) -> tuple[li
             store.link_candidate(vacancy.id, cid, score, tier, reason)
             new_cids.add(cid)
     except JijiScrapeError as exc:
-        return [], str(exc)
+        return [], truncate_error(str(exc))
     except Exception as exc:  # noqa: BLE001 - loop must survive unexpected errors
-        return [], f"Scrape failed for {vacancy.label()}: {exc}"
+        return [], truncate_error(f"Scrape failed for {short_vacancy_label(vacancy)}: {exc}")
     if not new_cids:
         return [], None
     links = [ln for ln in store.links_for_vacancy(vacancy.id) if ln.get("candidate_id") in new_cids]
     return links, None
+
+
+async def scrape_one_vacancy_async(store, vacancy, scraper, max_cards: int = 20) -> tuple[list[dict], str | None]:
+    """Async-safe wrapper for Telegram handlers (async context).
+
+    Runs the sync ``scrape_one_vacancy`` (which may invoke the Playwright
+    Sync API via the scraper) in ``asyncio.to_thread`` — a worker thread
+    with no running loop, so the Sync API works and the event loop is
+    never blocked by requests/sleeps. Sync callers keep the sync version.
+    """
+    import asyncio
+
+    return await asyncio.to_thread(scrape_one_vacancy, store, vacancy, scraper, max_cards)
 
 
 def scrape_all_active(store, scraper, max_cards: int = 20) -> tuple[dict[int, list[dict]], list[str]]:
@@ -225,6 +281,13 @@ def scrape_all_active(store, scraper, max_cards: int = 20) -> tuple[dict[int, li
         if err:
             errors.append(err)
     return per_vacancy, errors
+
+
+async def scrape_all_active_async(store, scraper, max_cards: int = 20) -> tuple[dict[int, list[dict]], list[str]]:
+    """Async-safe wrapper for Telegram handlers (see scrape_one_vacancy_async)."""
+    import asyncio
+
+    return await asyncio.to_thread(scrape_all_active, store, scraper, max_cards)
 
 
 def dedup_new_links(links: list[dict]) -> list[dict]:

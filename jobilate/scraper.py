@@ -32,6 +32,27 @@ class JijiScrapeError(Exception):
     pass
 
 
+def truncate_url(url: str, limit: int = 120) -> str:
+    """Truncate a URL for error messages — never leak a giant query.
+
+    A corrupted vacancy title once produced a multi-KB search URL that
+    flooded the Telegram error bubble. Error messages use this helper
+    so only the first `limit` chars + "..." are ever shown.
+    """
+    url = url or ""
+    if len(url) <= limit:
+        return url
+    return url[:limit] + "..."
+
+
+def truncate_error_text(text: str, limit: int = 500) -> str:
+    """Cap an error string for Telegram — the full cause is in logs, not chat."""
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
 def _is_challenge_text(text: str) -> bool:
     low = (text or "").lower()
     return ("challenge" in low[:2000] and "cloudflare" in low[:2000]) or (
@@ -54,6 +75,19 @@ class JijiScraper:
     data_dir: str = "./data"
 
     # ---- polite fetching ----
+    async def fetch_async(self, url: str) -> str:
+        """Async-safe fetch for Telegram handlers (async context).
+
+        The sync ``fetch`` may invoke the Playwright Sync API (browser
+        fallback), which raises "Sync API inside the asyncio loop" when
+        called on the event-loop thread. Running the whole sync fetch in
+        ``asyncio.to_thread`` puts it on a worker thread with no running
+        loop, so the Sync API works. Sync callers keep using ``fetch``.
+        """
+        import asyncio
+
+        return await asyncio.to_thread(self.fetch, url)
+
     def fetch(self, url: str) -> str:
         now = time.monotonic()
         if url in self._cache:
@@ -96,11 +130,13 @@ class JijiScraper:
         try:
             resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
         except Exception as exc:
-            raise JijiScrapeError(f"Jiji fetch failed for {url}: {exc}") from exc
+            raise JijiScrapeError(
+                f"Jiji fetch failed for {truncate_url(url)}: {truncate_error_text(str(exc), 300)}"
+            ) from exc
         if resp.status_code in (403, 503) or _is_challenge_text(resp.text):
             raise JijiScrapeError("Jiji returned a challenge/block page (HTTP %s). Do not retry aggressively — try again later or open the page manually." % resp.status_code)
         if resp.status_code != 200:
-            raise JijiScrapeError(f"Jiji returned HTTP {resp.status_code} for {url}")
+            raise JijiScrapeError(f"Jiji returned HTTP {resp.status_code} for {truncate_url(url)}")
         return resp.text
 
     def _fetch_browser(self, url: str) -> str:
@@ -113,6 +149,8 @@ class JijiScraper:
 
     def search_url(self, query: str) -> str:
         import urllib.parse
+        # Defensive cap: a corrupted title must never produce a giant URL.
+        query = (query or "")[:150]
         return JIJI_CV_SEARCH.format(query=urllib.parse.quote_plus(query))
 
     # ---- parsing (pure HTML -> dicts, no network) ----

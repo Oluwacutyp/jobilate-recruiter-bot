@@ -128,6 +128,10 @@ def parse_vacancy_text(text: str) -> dict:
             if line.strip():
                 title = _title_case_if_shouting(line.strip()[:120])
                 break
+    # Defensive (2026-10-14): title MUST be a single line, max 120 chars.
+    # A pasted vacancy must never become the title (that once produced a
+    # multi-KB title -> giant search URL -> giant error bubble).
+    title = (title.splitlines()[0].strip() if title.strip() else "")[:120]
     location = fields.get("location") or guess_location(text)
     pay_raw = fields.get("pay") or fields.get("salary") or ""
     pay_text, pay_min = parse_pay(pay_raw or text) if pay_raw else ("", None)

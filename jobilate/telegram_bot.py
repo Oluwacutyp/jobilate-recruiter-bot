@@ -25,7 +25,9 @@ from .autoscrape import (
     build_reply_keyboard_remove,
     looks_like_vacancy,
     scrape_all_active,
+    scrape_all_active_async,
     scrape_one_vacancy,
+    scrape_one_vacancy_async,
     should_send_todo,
 )
 from .config import Config
@@ -580,9 +582,12 @@ class JobilateBot:
         )
         chat_id = update.effective_chat.id
         for v in targets:
-            new_links, err = scrape_one_vacancy(self.store, v, scraper)
+            # Async-safe: sync scrape (may use Playwright Sync API) runs in
+            # a worker thread via scrape_one_vacancy_async.
+            new_links, err = await scrape_one_vacancy_async(self.store, v, scraper)
             if err:
-                await update.message.reply_text(f"Jiji blocked, retrying later: {err}")
+                err_short = err if len(err) <= 500 else err[:500] + "..."
+                await update.message.reply_text(f"Jiji blocked, retrying later: {err_short}")
                 continue
             if not new_links:
                 await update.message.reply_text(f"No new matches for {v.label()} this run.")
@@ -822,6 +827,30 @@ class JobilateBot:
         return next_state
 
     async def newvacancy_role(self, update, context):
+        # ADDITIVE (2026-10-14): if the Step 1 answer is actually a FULL
+        # pasted vacancy (multi-line + vacancy-like), parse it as a pasted
+        # vacancy (draft + CONFIRM) instead of saving the whole paste as
+        # the title — that once produced a multi-KB title -> giant URL.
+        text = (update.message.text or "").strip()
+        if "\n" in text and looks_like_vacancy(text):
+            parsed = parse_vacancy_text(text)
+            if vagueness(parsed) != "too_vague":
+                context.user_data["vacancy"] = parsed
+                context.user_data["vacancy"]["raw_text"] = text
+                await update.message.reply_text(
+                    f"I read this as:\n{self._draft_text(parsed)}\n\nTap YES to save it, or NO for the step-by-step wizard (or just type YES / NO).",
+                    reply_markup=self._draft_keyboard())
+                return CONFIRM
+            await update.message.reply_text(
+                "That looks too vague to scrape. Please tell me in one message: what role, where, and what qualifications? (e.g. 'Sales Supervisor, Lagos, B.Tech + 5 years vet drug sales')")
+            return ROLE
+        if "\n" in text:
+            # Defensive: multi-line but not vacancy-like — keep ONLY the
+            # first line as the title, never the whole paste.
+            first_line = text.splitlines()[0].strip()[:120]
+            context.user_data.setdefault("vacancy", {})["title"] = first_line
+            await update.message.reply_text("Step 2 — Location? (e.g. Lagos State)")
+            return LOCATION
         return await self._wizard_step(update, context, "title", LOCATION, "Step 2 — Location? (e.g. Lagos State)")
 
     async def newvacancy_location(self, update, context):
@@ -1138,14 +1167,17 @@ class JobilateBot:
             profile_dir=getattr(self.config, 'browser_profile_dir', '') or None,
             data_dir=self.config.data_dir,
         )
-        per_vacancy, errors = scrape_all_active(self.store, scraper)
+        # Async-safe: sync scrape (may use Playwright Sync API) runs in a
+        # worker thread via scrape_all_active_async.
+        per_vacancy, errors = await scrape_all_active_async(self.store, scraper)
         for err in errors:
             # Throttle block notices to at most one per hour.
             hour_key = now.strftime("%Y-%m-%d %H")
             if getattr(self, "_last_scrape_error_hour", None) != hour_key:
                 self._last_scrape_error_hour = hour_key
+                err_short = err if len(err) <= 500 else err[:500] + "..."
                 try:
-                    await send_to_recruiter(context, chat_id, f"Jiji blocked, retrying later: {err}", self.config.admin_chat_id)
+                    await send_to_recruiter(context, chat_id, f"Jiji blocked, retrying later: {err_short}", self.config.admin_chat_id)
                 except Exception:  # noqa: BLE001 - notify failure must not kill the loop
                     pass
         for vid, new_links in per_vacancy.items():
