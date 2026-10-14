@@ -174,7 +174,8 @@ def _is_block_error(msg: str) -> bool:
     low = (msg or "").lower()
     return any(
         token in low
-        for token in ("challenge", "403", "503", "blocked", "turnstile", "verify you are human", "verify you're human")
+        for token in ("challenge", "403", "503", "blocked", "turnstile", "verify you are human", "verify you're human",
+                      "just a moment", "cloudflare", "checking your browser")
     )
 
 

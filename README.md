@@ -90,31 +90,74 @@ See `SPEC.md` for the full list. Highlights:
 - **Re-sending `/newvacancy` while in the wizard** restarts the wizard
   instead of going quiet. `/cancel` always exits the wizard.
 
-## Turnstile fallback (Playwright) — bot clicks "Verify you're human" itself
+## Cloudflare fallback chain — "Verify you're human" / "Just a moment..."
 
-Jiji sometimes returns a Cloudflare Turnstile "Verify you're human"
-checkbox page (HTTP 403) to the bot's `requests` fetches. The bot
-tries `requests` first (fast, polite). On a challenge/block page it
-falls back ONCE per URL to a real Chromium that clicks the checkbox
-(a real browser click — no solving services, no token forgery) and
-returns the resulting HTML, so the existing parsers work unchanged.
+Jiji sits behind Cloudflare. The bot uses a FIRST-CLASS fallback
+chain with more than one fallback (user-approved 2026-10-14):
 
-Why solving it in Chrome does NOT unblock the bot: Chrome and the
-bot have separate cookies/fingerprints. The bot's own persistent
-browser profile (`DATA_DIR/browser_profile`) holds the verified
-session across runs — first run may need to verify, later runs reuse it.
+1. **requests + CF_CLEARANCE + Edge UA** — the fast path. If
+   `CF_CLEARANCE` is set in `.env`, requests sends it as a cookie
+   with the Edge User-Agent (same browser + same RDP + same UA that
+   solved it, or Cloudflare may reject the cookie).
+2. **Playwright real Microsoft Edge + stealth + CF_CLEARANCE** — on a
+   challenge/block page, the bot falls back ONCE per URL to real Edge
+   (`channel="msedge"`, fallback Chrome → Chromium if Edge is not
+   installed), with a stealth init script (hides `navigator.webdriver`,
+   spoofs `window.chrome` / plugins / languages / permissions — no
+   solving services, no token forgery), small human-like behaviour
+   (pause, mouse move, slow scroll), and the `cf_clearance` cookie in
+   the browser context. It clicks the Turnstile checkbox if one is
+   present, and polls up to 30s for the automatic "Just a moment..."
+   check to clear (there is nothing to click on that page — the
+   browser must pass the automatic check).
+3. **Clear human handoff error** — if both fail: "Cloudflare 'Just a
+   moment...' challenge — solve in Edge, update CF_CLEARANCE in
+   .env, retry." Never a fake result.
+
+Why real Edge, not Playwright's Chromium? User-verified 2026-10-14:
+same RDP, same IP — real Edge passes Cloudflare, bot's Playwright
+Chromium gets "Just a moment...". That proves it is automation
+fingerprinting, not IP blocking alone. Edge passes because it is a
+real browser + human signals; Playwright's bundled Chromium is
+detected. Edge is preinstalled on Windows RDP — no extra install.
+
+### CF_CLEARANCE handoff (if you solve it in Edge)
+
+Yes — if you solve it, the bot reuses your cookie. Steps on the RDP:
+
+1. In **Microsoft Edge** on the RDP, open `https://jiji.ng/seeking-work-cvs`,
+   wait for it to load past "Just a moment..." (no checkbox needed).
+2. Press `F12` → **Application** tab → **Cookies** → `https://jiji.ng`
+   → copy the **`cf_clearance`** cookie **Value**.
+3. In the bot folder, edit `.env` and add:
+   ```text
+   CF_CLEARANCE=<paste the value here>
+   ```
+4. Save. **No restart needed** — the bot re-reads `.env` on EVERY
+   scrape (both requests and Playwright), so the new cookie is used
+   on the next `/scrape`. Never share the value, never paste it in
+   Telegram — it is a session cookie, and the bot never logs it and
+   never puts it in error messages.
+5. Use the **same Edge + same RDP (same IP + same UA)** that solved
+   it. The bot uses `JIJI_USER_AGENT` (default: Edge UA) for BOTH
+   requests and Playwright, so the cookie matches. If you solve in a
+   different browser / machine / IP, Cloudflare may reject the cookie.
+
+**Expiry:** `cf_clearance` typically expires in ~30min–2h (sometimes
+longer). When it expires you will see the Cloudflare error again —
+just re-solve in Edge + update `.env` (no restart needed).
 
 Windows RDP steps (one-time):
 ```powershell
 pip install -r requirements.txt
-playwright install chromium
+playwright install msedge
 ```
-Then `git pull`, restart the bot, and `/scrape 1` to retry. If the
+Then `git pull`, restart the bot, and `/scrape 2` to retry. If the
 challenge still shows, wait + retry — the bot never retries
 aggressively and never fakes results. Set `PLAYWRIGHT_ENABLED=0`
-in `.env` to disable the fallback (requests only). `PLAYWRIGHT_HEADLESS`
-defaults to headed (0) on Windows for the best Turnstile pass rate,
-headless (1) elsewhere. See `/config` and `/limits` in the bot.
+in `.env` to disable the browser fallback (requests only).
+`PLAYWRIGHT_HEADLESS` defaults to headed (0) on Windows for the best
+pass rate, headless (1) elsewhere. See `/config` and `/limits`.
 
 Implementation note: the Playwright Sync API cannot run on the
 Telegram bot's asyncio event-loop thread ("Sync API inside the asyncio
@@ -122,6 +165,11 @@ loop"). The bot therefore runs the whole sync scrape — including the
 browser fallback — in `asyncio.to_thread` (a worker thread with no
 running loop) via `scrape_one_vacancy_async` / `scrape_all_active_async`
 / `JijiScraper.fetch_async`. Sync callers keep the sync versions.
+
+Error classification: a "Just a moment..." / "Checking your browser"
+page is reported as a Cloudflare block (with a short diagnostic:
+`diag: title=... anchors=N html_len=N flags=...`), NEVER as "page
+structure changed".
 
 ## How Jiji pages are parsed (current structure, verified live 2026-10-14)
 
@@ -206,9 +254,11 @@ No candidate messaging exists on any platform.
 | `QUIET_HOURS_START` / `QUIET_HOURS_END` | No live pushes in this window (default 22–07) |
 | `SCRAPE_MIN_DELAY_SECONDS` | ≥3s between Jiji page loads |
 | `CACHE_TTL_MINUTES` | Jiji page cache (default 15) |
-| `PLAYWRIGHT_ENABLED` | Turnstile browser fallback (default 1, 0 = requests only) |
+| `PLAYWRIGHT_ENABLED` | Browser fallback (default 1, 0 = requests only) |
 | `PLAYWRIGHT_HEADLESS` | 0 = headed (default on Windows), 1 = headless |
 | `BROWSER_PROFILE_DIR` | Verified browser session (default `DATA_DIR/browser_profile`) |
+| `CF_CLEARANCE` | Human-verified Cloudflare cookie from Edge (re-read from `.env` each scrape, no restart needed; expires ~30min–2h; never logged) |
+| `JIJI_USER_AGENT` | UA for both requests + Playwright (default: Edge UA — must match the Edge that solved the cookie) |
 | `SCRAPE_INTERVAL_MINUTES` | Auto-scrape loop interval (default 30, min 5) |
 | `TODO_HOUR` | Hour the morning to-do is auto-sent (default 8) |
 

@@ -78,8 +78,8 @@ Bot go send you to-do by itself every morning for 8am (unless school mode dey on
 Send `/todo` any time to see am again. E go show you:
 New people to review, people you never text yet, follow-ups wey don due.
 
-**If Jiji ask "Verify you're human"**
-Bot go click am itself now — you no need solve am for Chrome. If e talk say "Jiji blocked, retrying later", just wait. E go retry by itself. You fit send `/scrape 1` to try again.
+**If Jiji ask "Verify you're human" / "Just a moment..."**
+Bot go use real Edge now (same browser you dey use) and click am itself — you no need solve am. If e talk say "Jiji blocked, retrying later" or "Cloudflare 'Just a moment...' challenge", just wait. E go retry by itself. You fit send `/scrape 1` to try again.
 
 **10. If something look wrong**
 Wrong vacancy? `/edit 1 pay_text=₦600,000` — and multi-word values work too, e.g. `/edit 1 title=Sales Supervisor`

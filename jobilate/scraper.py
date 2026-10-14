@@ -90,6 +90,43 @@ def _dedupe_cards(cards: list[dict]) -> list[dict]:
     return out
 
 
+def _is_cloudflare_challenge_html(html: str, soup=None) -> bool:
+    """True for Cloudflare's automatic 'Just a moment...' challenge page.
+
+    Title 'Just a moment...' + Cloudflare mention, or 'Checking your
+    browser' + Cloudflare. Classified as a BLOCK, never as a
+    'page structure changed' error.
+    """
+    low = (html or "").lower()
+    title = ""
+    try:
+        if soup is not None and soup.title:
+            title = soup.title.get_text(" ", strip=True).lower()
+    except Exception:
+        title = ""
+    if not title and "<title>" in low:
+        try:
+            title = low.split("<title>", 1)[1].split("</title>", 1)[0]
+        except Exception:
+            title = ""
+    if any(p in title for p in ("just a moment", "checking your browser", "attention required", "cf-challenge")):
+        return True
+    if "just a moment" in low and "cloudflare" in low:
+        return True
+    if "checking your browser" in low and "cloudflare" in low:
+        return True
+    return False
+
+
+def _cloudflare_block_message(url: str, html: str, soup) -> str:
+    """Human handoff error for a Cloudflare block (no HTML, no cookie)."""
+    return (
+        "Cloudflare 'Just a moment...' challenge — bot's browser was flagged "
+        "as automated. Solve in Edge, update CF_CLEARANCE in .env, retry. "
+        f"for {truncate_url(url)} " + _page_diagnostic(html, soup)
+    )
+
+
 def _page_diagnostic(html: str, soup) -> str:
     """SHORT diagnostic for no-cards errors: page title + flags only.
 
@@ -110,6 +147,12 @@ def _page_diagnostic(html: str, soup) -> str:
     flags = []
     if "verify you are human" in low or "verify you're human" in low:
         flags.append("verify-human")
+    if "just a moment" in low:
+        flags.append("just-a-moment")
+    if "checking your browser" in low:
+        flags.append("checking-browser")
+    if "cloudflare" in low:
+        flags.append("cloudflare")
     if "challenge" in low:
         flags.append("challenge")
     if "0 results" in low:
@@ -132,6 +175,10 @@ def _is_challenge_text(text: str) -> bool:
     low = (text or "").lower()
     return ("challenge" in low[:2000] and "cloudflare" in low[:2000]) or (
         "verify you are human" in low or "verify you're human" in low
+    ) or (
+        "just a moment" in low[:2000] and "cloudflare" in low[:2000]
+    ) or (
+        "checking your browser" in low[:2000] and "cloudflare" in low[:2000]
     )
 
 
@@ -148,6 +195,9 @@ class JijiScraper:
     playwright_enabled: bool = True
     profile_dir: str | None = None
     data_dir: str = "./data"
+    # .env path for CF_CLEARANCE / JIJI_USER_AGENT re-read each scrape.
+    # None = auto-discover (DOTENV_PATH, ./.env, repo-root .env).
+    dotenv_path: str | None = None
 
     # ---- polite fetching ----
     async def fetch_async(self, url: str) -> str:
@@ -195,20 +245,46 @@ class JijiScraper:
     @staticmethod
     def _looks_like_challenge_error(exc: Exception) -> bool:
         msg = str(exc).lower()
-        return "challenge" in msg or "403" in msg or "503" in msg or "blocked" in msg
+        return (
+            "challenge" in msg or "403" in msg or "503" in msg or "blocked" in msg
+            or "just a moment" in msg or "cloudflare" in msg
+            or "checking your browser" in msg
+        )
 
     def _fetch_requests(self, url: str) -> str:
         if self._fetcher is not None:
             return self._fetcher(url)
         if requests is None:
             raise JijiScrapeError("requests is not installed")
+        # Fallback chain step 1: requests + CF_CLEARANCE + Edge UA.
+        # CF_CLEARANCE + UA are re-read from .env on EVERY scrape, so
+        # updating .env needs NO restart. The cookie value is NEVER
+        # logged and NEVER put in errors. Same UA as the Edge that
+        # solved it (same browser + same RDP + same UA) or Cloudflare
+        # may reject the cookie.
+        headers = {"User-Agent": USER_AGENT}
         try:
-            resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+            from .browser_fetch import jiji_user_agent, read_cf_clearance
+
+            headers["User-Agent"] = jiji_user_agent(getattr(self, "dotenv_path", None))
+            clearance = read_cf_clearance(getattr(self, "dotenv_path", None))
+            if clearance:
+                headers["Cookie"] = "cf_clearance=" + clearance
+        except Exception:
+            pass
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
         except Exception as exc:
             raise JijiScrapeError(
                 f"Jiji fetch failed for {truncate_url(url)}: {truncate_error_text(str(exc), 300)}"
             ) from exc
         if resp.status_code in (403, 503) or _is_challenge_text(resp.text):
+            if _is_cloudflare_challenge_html(resp.text):
+                raise JijiScrapeError(
+                    "Cloudflare 'Just a moment...' challenge — bot's browser was flagged "
+                    "as automated. Solve in Edge, update CF_CLEARANCE in .env, retry. "
+                    f"for {truncate_url(url)}"
+                )
             raise JijiScrapeError("Jiji returned a challenge/block page (HTTP %s). Do not retry aggressively — try again later or open the page manually." % resp.status_code)
         if resp.status_code != 200:
             raise JijiScrapeError(f"Jiji returned HTTP {resp.status_code} for {truncate_url(url)}")
@@ -220,7 +296,10 @@ class JijiScraper:
         from .browser_fetch import default_profile_dir, fetch_with_browser
 
         profile = self.profile_dir or default_profile_dir(self.data_dir)
-        return fetch_with_browser(url, profile_dir=profile, data_dir=self.data_dir)
+        return fetch_with_browser(
+            url, profile_dir=profile, data_dir=self.data_dir,
+            dotenv_path=getattr(self, "dotenv_path", None),
+        )
 
     def search_url(self, query: str) -> str:
         import urllib.parse
@@ -251,6 +330,11 @@ class JijiScraper:
         if BeautifulSoup is None:
             raise JijiScrapeError("beautifulsoup4 is not installed")
         soup = BeautifulSoup(html, "html.parser")
+        # 0. Cloudflare "Just a moment..." challenge -> BLOCK error,
+        # never "page structure changed". (2026-10-14: bot got
+        # title='Just a moment...', anchors=2 — challenge page, not Jiji.)
+        if _is_cloudflare_challenge_html(html, soup):
+            raise JijiScrapeError(_cloudflare_block_message("", html, soup))
         # 1. Card-shaped anchors first.
         cards = _anchors_to_cards(
             [a for a in soup.find_all("a", href=True) if _looks_like_cv_card_anchor(a)]

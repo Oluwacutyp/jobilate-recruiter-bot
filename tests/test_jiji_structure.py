@@ -84,10 +84,14 @@ def test_zero_results_returns_empty_not_error():
 
 
 def test_empty_challenge_page_raises_with_diagnostic():
+    # UPDATED 2026-10-14 (Cloudflare fix): a challenge page is now
+    # classified as a Cloudflare block, NOT "page structure changed".
     with pytest.raises(JijiScrapeError) as excinfo:
         JijiScraper(min_delay=0).parse_cv_list_html(CHALLENGE_SHELL_HTML)
     msg = str(excinfo.value)
-    assert "no CV cards found" in msg
+    assert "cloudflare" in msg.lower()
+    assert "just a moment" in msg.lower()
+    assert "structure changed" not in msg.lower()
     assert "diag:" in msg
     assert "verify-human" in msg
     assert "anchors=0" in msg
