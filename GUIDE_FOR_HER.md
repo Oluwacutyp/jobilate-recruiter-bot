@@ -151,6 +151,12 @@ school mode is on). Send `/todo` any time to see it again. It shows:
 - People you have not texted yet
 - Follow-ups due (you texted them 3 or more days ago, no reply)
 
+## If Jiji asks "Verify you're human"
+
+The bot clicks it itself now — you don't need to solve it in Chrome.
+If it says "Jiji blocked, retrying later", just wait. It retries by
+itself. You can also send `/scrape 1` to try again.
+
 ## 10. If something looks wrong
 
 - Wrong vacancy details? `/edit 1 pay_text=₦600,000` (change what you need).
