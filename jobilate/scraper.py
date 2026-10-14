@@ -32,6 +32,13 @@ class JijiScrapeError(Exception):
     pass
 
 
+def _is_challenge_text(text: str) -> bool:
+    low = (text or "").lower()
+    return ("challenge" in low[:2000] and "cloudflare" in low[:2000]) or (
+        "verify you are human" in low or "verify you're human" in low
+    )
+
+
 @dataclass
 class JijiScraper:
     min_delay: float = 3.0
@@ -39,6 +46,12 @@ class JijiScraper:
     _last_fetch: float = field(default=0.0, repr=False)
     _cache: dict = field(default_factory=dict, repr=False)
     _fetcher: Callable[[str], str] | None = field(default=None, repr=False)
+    # ADDITIVE (2026-10-14): Playwright Turnstile fallback.
+    # browser_fetcher(url) -> HTML. When None, fetch_with_browser is used.
+    browser_fetcher: Callable[[str], str] | None = field(default=None, repr=False)
+    playwright_enabled: bool = True
+    profile_dir: str | None = None
+    data_dir: str = "./data"
 
     # ---- polite fetching ----
     def fetch(self, url: str) -> str:
@@ -51,22 +64,52 @@ class JijiScraper:
         if wait > 0:
             time.sleep(wait)
         self._last_fetch = time.monotonic()
-        if self._fetcher is not None:
-            body = self._fetcher(url)
-        else:
-            if requests is None:
-                raise JijiScrapeError("requests is not installed")
-            try:
-                resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
-            except Exception as exc:
-                raise JijiScrapeError(f"Jiji fetch failed for {url}: {exc}") from exc
-            if resp.status_code in (403, 503) or "challenge" in resp.text.lower()[:2000] and "cloudflare" in resp.text.lower()[:2000]:
-                raise JijiScrapeError("Jiji returned a challenge/block page (HTTP %s). Do not retry aggressively — try again later or open the page manually." % resp.status_code)
-            if resp.status_code != 200:
-                raise JijiScrapeError(f"Jiji returned HTTP {resp.status_code} for {url}")
-            body = resp.text
+        try:
+            body = self._fetch_requests(url)
+            # _fetcher (test/mock) path may return challenge HTML instead of
+            # raising — treat it as a challenge too so fallback still works.
+            if _is_challenge_text(body):
+                raise JijiScrapeError(
+                    "Jiji returned a challenge/block page. Trying browser fallback once."
+                )
+        except JijiScrapeError as exc:
+            # Challenge/block only: try the real-browser fallback ONCE.
+            # Any other failure (network, structure) raises as before.
+            if not self._looks_like_challenge_error(exc):
+                raise
+            if not self.playwright_enabled:
+                raise
+            body = self._fetch_browser(url)
         self._cache[url] = (time.monotonic(), body)
         return body
+
+    @staticmethod
+    def _looks_like_challenge_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "challenge" in msg or "403" in msg or "503" in msg or "blocked" in msg
+
+    def _fetch_requests(self, url: str) -> str:
+        if self._fetcher is not None:
+            return self._fetcher(url)
+        if requests is None:
+            raise JijiScrapeError("requests is not installed")
+        try:
+            resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+        except Exception as exc:
+            raise JijiScrapeError(f"Jiji fetch failed for {url}: {exc}") from exc
+        if resp.status_code in (403, 503) or _is_challenge_text(resp.text):
+            raise JijiScrapeError("Jiji returned a challenge/block page (HTTP %s). Do not retry aggressively — try again later or open the page manually." % resp.status_code)
+        if resp.status_code != 200:
+            raise JijiScrapeError(f"Jiji returned HTTP {resp.status_code} for {url}")
+        return resp.text
+
+    def _fetch_browser(self, url: str) -> str:
+        if self.browser_fetcher is not None:
+            return self.browser_fetcher(url)
+        from .browser_fetch import default_profile_dir, fetch_with_browser
+
+        profile = self.profile_dir or default_profile_dir(self.data_dir)
+        return fetch_with_browser(url, profile_dir=profile, data_dir=self.data_dir)
 
     def search_url(self, query: str) -> str:
         import urllib.parse
