@@ -38,6 +38,9 @@ When the bot finds a CV, it sends you a card like this:
   **Tier3** means vague or unknown — still worth a look, after Tier1 and Tier2.
 - **Why** tells you why the bot picked this person.
 - The phone number is on the card. Copy it. You text the person yourself.
+- Each new card also comes with that person's CV file (a `.txt` file).
+  Open it to read the full CV. Batched cards come with one ZIP instead,
+  holding all those CVs (see section 6b for how to unzip).
 
 ## 3. Text the candidate yourself
 
@@ -66,18 +69,36 @@ Marks matter. They show in your CSV, your stats, and your harvest.
 ## 5. Harvest vs Dump — get your list
 
 - `/harvest` — sends you only the NEW candidates you have not
-  seen yet, plus a CSV file. Use this every day.
+  seen yet, plus a CSV file + a ZIP file. Use this every day.
 - `/harvest unsent` — candidates you have not texted yet.
 - `/harvest unsent_employer` — candidates not yet sent to the employer.
 - `/dump` — sends EVERYTHING. Only use it when you really need the full list.
 
-Harvest always sends two things: a readable list + a real CSV file.
+Harvest always sends THREE things:
+1. A readable list (the digest message) — scan it quickly.
+2. A real CSV file — open it right now, no unzipping needed.
+3. A ZIP file — the full pack: CSV copy + one CV file per candidate
+   + a README that explains how to unzip.
 
-## 6. Get a CSV
+## 6. Get a CSV + CV files + ZIP
 
-- `/export 1` — CSV file for vacancy 1.
-- `/export` — CSV file for all vacancies.
+- `/export 1` — digest + CSV + ZIP for vacancy 1.
+- `/export` — digest + CSV + ZIP for all vacancies.
 - `/shortlist 1` — only the Interested candidates for vacancy 1.
+
+## 6b. How to unzip the ZIP (and read the CVs)
+
+The ZIP holds one CV file per candidate, named like
+`cv_7_Name.txt`. Each one is plain text — it opens on any phone.
+
+- **Android:** tap the ZIP in Telegram → tap Extract, or open it with
+  the Files app → long-press the ZIP → Extract. The CV files appear
+  next to it. Tap any `.txt` to read it.
+- **iPhone:** tap the ZIP → Preview → Share → Save to Files → open
+  Files, long-press the ZIP → Uncompress.
+- **Windows:** right-click the ZIP → Extract All → Extract.
+
+If you only need the quick list, just open the CSV — no unzipping needed.
 
 ## 7. Start, stop, pause
 

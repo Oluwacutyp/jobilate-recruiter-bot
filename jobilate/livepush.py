@@ -2,9 +2,9 @@
 
 Rules (locked): Tier1 sends immediately; the rest batch every
 live_batch_minutes OR every live_batch_size new matches. Live pushes
-send CARD ONLY — no CSV file each time (spam). Card carries the note
-'CSV updated — use /harvest for full CSV'. Quiet hours respected.
-Per-vacancy live on/off; global live-off = harvest-only.
+send card + CV file (single) or digest + ZIP (batch) — never just a
+bare link, and never a full CSV file per candidate (spam). Quiet hours
+respected. Per-vacancy live on/off; global live-off = harvest-only.
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def format_card(link: dict, vacancy_label: str, other_matches: list[str] | None 
         lines.append("Also matches: " + ", ".join(other_matches))
     if link.get("cv_url"):
         lines.append(f"CV: {link['cv_url']}")
-    lines.append("CSV updated — use /harvest for full CSV")
+    lines.append("CV file attached below — use /harvest for full CSV + ZIP")
     return "\n".join(lines)
 
 

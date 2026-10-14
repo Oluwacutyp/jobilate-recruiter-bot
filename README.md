@@ -33,6 +33,27 @@ Demo without Telegram:
 python run.py --once-vacancy-file /tmp/sample_vacancy.txt
 ```
 
+## What you get on every delivery — digest + CSV + ZIP
+
+Bulk sends (`/harvest`, `/dump`, `/export`) always deliver THREE things:
+1. **Digest** — readable Telegram message, scan it quickly.
+2. **Real CSV file** — opens right now, no unzipping needed. Full list in a table.
+3. **ZIP file** — full pack: CSV copy + one CV `.txt` file per candidate
+   (`cv_<candidate_id>_<name>.txt`, plain text, opens on any phone)
+   + `README.txt` with how-to-unzip steps.
+
+Live push: single new match → card + its CV `.txt` file. Batched matches →
+one digest message + one ZIP with those CVs. If a ZIP would exceed 45MB,
+the bot sends digest + CSV only + a plain note (text CVs are tiny, so
+this is a safety cap, not the normal path).
+
+How to unzip:
+- **Android:** tap the ZIP in Telegram → Extract, or open it with the
+  Files app → long-press the ZIP → Extract. The `.txt` CV files appear next to it.
+- **iPhone:** tap the ZIP → Preview → Share → Save to Files → open Files,
+  long-press the ZIP → Uncompress.
+- **Windows:** right-click the ZIP → Extract All → Extract.
+
 ## Commands
 
 See `/help` in the bot, or `SPEC.md`. Highlights:
@@ -69,7 +90,7 @@ No candidate messaging exists on any platform.
 
 ## Layout
 
-- `jobilate/` — real package: config, parser, matching, dedup, store (SQLite), CSV, scraper, live push, harvest, reminders, template, Telegram bot
+- `jobilate/` — real package: config, parser, matching, dedup, store (SQLite), CSV, CV files + ZIP (`cv_files.py`), scraper, live push, harvest, reminders, template, Telegram bot
 - `tests/` — pytest suite incl. hard-limit scan
 - `scripts/` — Windows deploy/run scripts
 
@@ -77,4 +98,4 @@ No candidate messaging exists on any platform.
 
 Candidate contacts go ONLY to the recruiter chat. Nothing is sent to
 candidates, employers, or any other chat. Backup ZIPs contain the DB +
-CSVs and are sent only to the recruiter.
+CSVs + CV files and are sent only to the recruiter.

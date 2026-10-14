@@ -46,15 +46,18 @@ CSV / harvest tagged with vacancy ID + title. Pause/stop one does not
 affect others.
 
 ## Live push (send-as-it-gets)
-As a new match is found, send a card. Smart batching: Tier1 immediate,
-rest batched every 5 min or every 5 new. Live pushes send CARD ONLY
-(no CSV file each time — avoids spam) with note
-"CSV updated — use /harvest for full CSV". Quiet hours respected.
+As a new match is found, send a card + its CV `.txt` file (single) or
+one digest message + one ZIP with CVs (batch). Smart batching: Tier1
+immediate, rest batched every 5 min or every 5 new. Never a bare link,
+never a full CSV per candidate (spam). Quiet hours respected.
 Per-vacancy live on/off; global live-off = harvest-only.
 
-## Digest + real CSV
-`/harvest`, `/dump`, `/export`, daily digest send BOTH a readable digest
-(Telegram message) + a real CSV file. Live pushes are card-only (exception above).
+## Digest + real CSV + ZIP
+`/harvest`, `/dump`, `/export`, daily digest send THREE things: a readable
+digest (Telegram message) + a real CSV file (opens now, no unzipping) +
+a ZIP (CSV copy + one CV `.txt` per candidate + README.txt with
+how-to-unzip steps). If a ZIP would exceed 45MB, send digest + CSV only
++ a plain note. Backup ZIP = DB + CSVs + CV files + README.
 
 ## Harvest
 - `/harvest [vacancy]` incremental = only `harvested_to_her=False`, then mark harvested.

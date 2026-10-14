@@ -16,6 +16,15 @@ from datetime import datetime
 from . import __version__
 from .config import Config
 from .csv_export import CSV_COLUMNS, build_digest, write_csv
+from .cv_files import (
+    UNZIP_README_TEXT,
+    build_harvest_zip,
+    cv_entries_for_links,
+    cv_filename,
+    cv_text_for_link,
+    safe_filename_component,
+    zip_exceeds_cap,
+)
 from .dedup import dedup_candidates
 from .harvest import harvest, harvest_counts
 from .livepush import LivePushQueue, format_card, in_quiet_hours
@@ -54,10 +63,10 @@ HELP_TEXT = """Jobilate Recruiter Bot — commands:
 /block <candidate_id> /unblock <candidate_id>
 /shortlist <vacancy_id> — Interested candidates for a vacancy
 /contacts — all candidate contacts (for your own outreach)
-/export [vacancy_id] /exportcsv [vacancy_id] — CSV file
-/backup — ZIP of DB + CSVs
-/harvest [vacancy_id|unsent|unsent_employer|all] — digest + CSV
-/dump [vacancy_id] — everything (digest + CSV)
+/export [vacancy_id] /exportcsv [vacancy_id] — digest + CSV + ZIP (CSV + CV files)
+/backup — ZIP of DB + CSVs + CV files
+/harvest [vacancy_id|unsent|unsent_employer|all] — digest + CSV + ZIP (CSV + CV files)
+/dump [vacancy_id] — everything (digest + CSV + ZIP)
 /todo — daily to-do + follow-ups
 /school on|off — busy mode (pause-all)
 /demo — run a demo match against sample CVs (no scraping)
@@ -453,13 +462,71 @@ class JobilateBot:
         await update.message.reply_text(interview_checklist({"title": v.title, "requirements_text": v.requirements_text}))
 
     # ---- export / harvest / backup ----
-    async def _send_csv(self, update, links: list[dict], vacancy_label: str, filename: str):
+    async def _send_csv(self, update, links: list[dict], vacancy_label: str, filename: str) -> str:
         os.makedirs(self.config.data_dir, exist_ok=True)
         path = os.path.join(self.config.data_dir, filename)
         write_csv(path, links, vacancy_label)
         guard_recipient(update.effective_chat.id, self.config.admin_chat_id)
         with open(path, "rb") as f:
             await update.message.reply_document(document=f, filename=filename, caption=f"CSV — {vacancy_label} ({len(links)} rows)")
+        return path
+
+    async def _send_harvest_pack(self, update, links: list[dict], vacancy_label: str, zip_name: str, csv_name: str) -> None:
+        """Bulk delivery: CSV file (opens now) + ZIP (CSV copy + CV files + README).
+
+        Digest is sent by the caller first. If the ZIP would exceed the
+        45MB Telegram safety cap, send digest + CSV only + a plain note.
+        """
+        csv_path = await self._send_csv(update, links, vacancy_label, csv_name)
+        zip_bytes = build_harvest_zip(links, csv_path=csv_path, vacancy_label=vacancy_label, store=self.store)
+        if zip_exceeds_cap(len(zip_bytes)):
+            await update.message.reply_text("ZIP too large (>45MB) — sent digest + CSV only. Use /backup in parts for full CV files.")
+            return
+        guard_recipient(update.effective_chat.id, self.config.admin_chat_id)
+        await update.message.reply_document(
+            document=io.BytesIO(zip_bytes), filename=zip_name,
+            caption=f"ZIP — {vacancy_label} ({len(links)} candidates): CSV + CV files + how-to-unzip README.")
+
+    async def send_live_push(self, context, chat_id, vacancy_label: str, links: list[dict]) -> None:
+        """Live-push delivery (the single live-push send path).
+
+        Single link: card text + one CV .txt file.
+        Multiple links (batch due): one digest message + one ZIP with CVs.
+        Every send is guarded to the recruiter chat only.
+        """
+        guard_recipient(chat_id, self.config.admin_chat_id)
+        if not links:
+            return
+        if len(links) == 1:
+            link = links[0]
+            others = []
+            if link.get("candidate_id") is not None:
+                others = [o.label() for o in self.store.other_vacancies_for_candidate(link["candidate_id"], link.get("vacancy_id"))]
+            await send_to_recruiter(context, chat_id, format_card(link, vacancy_label, others), self.config.admin_chat_id)
+            candidate = None
+            if link.get("candidate_id") is not None:
+                try:
+                    candidate = self.store.get_candidate(int(link["candidate_id"]))
+                except (TypeError, ValueError):
+                    candidate = None
+            guard_recipient(chat_id, self.config.admin_chat_id)
+            await context.bot.send_document(
+                chat_id=int(chat_id),
+                document=io.BytesIO(cv_text_for_link(link, candidate=candidate).encode("utf-8")),
+                filename=cv_filename(link),
+                caption=f"CV — {link.get('name', '')} ({vacancy_label})")
+            return
+        await send_to_recruiter(context, chat_id, build_digest(links, vacancy_label), self.config.admin_chat_id)
+        zip_bytes = build_harvest_zip(links, vacancy_label=vacancy_label, store=self.store)
+        if zip_exceeds_cap(len(zip_bytes)):
+            await send_to_recruiter(context, chat_id, "ZIP too large (>45MB) — sent digest only. Use /harvest for CSV + CV files.", self.config.admin_chat_id)
+            return
+        guard_recipient(chat_id, self.config.admin_chat_id)
+        await context.bot.send_document(
+            chat_id=int(chat_id),
+            document=io.BytesIO(zip_bytes),
+            filename=f"live_{safe_filename_component(vacancy_label)}.zip",
+            caption=f"ZIP — {vacancy_label} ({len(links)} candidates): CSV + CV files + how-to-unzip README.")
 
     async def cmd_export(self, update, context):
         await self._do_export(update, context, "export")
@@ -475,9 +542,13 @@ class JobilateBot:
                 await update.message.reply_text(err)
                 return
             links = self.store.links_for_vacancy(v.id)
-            await self._send_csv(update, links, v.label(), f"vacancy_{v.id}.csv")
+            label = v.label()
+            await update.message.reply_text(build_digest(links, label))
+            await self._send_harvest_pack(update, links, label, f"export_{v.id}.zip", f"export_{v.id}.csv")
         else:
-            await self._send_csv(update, self.store.all_links(), "All vacancies", "all_candidates.csv")
+            links = self.store.all_links()
+            await update.message.reply_text(build_digest(links, "All vacancies"))
+            await self._send_harvest_pack(update, links, "All vacancies", "export_all.zip", "export_all.csv")
 
     async def cmd_harvest(self, update, context):
         args = [a.lower() for a in (context.args or [])]
@@ -499,7 +570,7 @@ class JobilateBot:
         await update.message.reply_text(digest)
         if links:
             label = self.store.get_vacancy(vid).label() if vid else "All vacancies"
-            await self._send_csv(update, links, label, f"harvest_{vid or 'all'}.csv")
+            await self._send_harvest_pack(update, links, label, f"harvest_{vid or 'all'}.zip", f"harvest_{vid or 'all'}.csv")
 
     async def cmd_dump(self, update, context):
         vid = _vid(context.args or [])
@@ -507,7 +578,7 @@ class JobilateBot:
         await update.message.reply_text(digest)
         if links:
             label = self.store.get_vacancy(vid).label() if vid else "All vacancies"
-            await self._send_csv(update, links, label, f"dump_{vid or 'all'}.csv")
+            await self._send_harvest_pack(update, links, label, f"dump_{vid or 'all'}.zip", f"dump_{vid or 'all'}.csv")
 
     async def cmd_backup(self, update, context):
         os.makedirs(self.config.data_dir, exist_ok=True)
@@ -518,9 +589,12 @@ class JobilateBot:
             for fn in os.listdir(self.config.data_dir):
                 if fn.endswith(".csv"):
                     zf.write(os.path.join(self.config.data_dir, fn), fn)
+            for fname, text in cv_entries_for_links(self.store.all_links(), store=self.store):
+                zf.writestr(fname, text)
+            zf.writestr("README.txt", UNZIP_README_TEXT)
         buf.seek(0)
         guard_recipient(update.effective_chat.id, self.config.admin_chat_id)
-        await update.message.reply_document(document=buf, filename="jobilate_backup.zip", caption="Backup: DB + CSVs (contacts only to you).")
+        await update.message.reply_document(document=buf, filename="jobilate_backup.zip", caption="Backup: DB + CSVs + CV files (contacts only to you).")
 
     async def cmd_todo(self, update, context):
         due = followups_due(self.store)
