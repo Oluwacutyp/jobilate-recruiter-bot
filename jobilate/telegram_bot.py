@@ -207,7 +207,7 @@ class JobilateBot:
     async def cmd_config(self, update, context):
         c = self.config
         await update.message.reply_text(
-            f"Config (no secrets shown):\nDATA_DIR={c.data_dir}\nQUIET_HOURS={c.quiet_hours_start:02d}:00–{c.quiet_hours_end:02d}:00\nSCRAPE_MIN_DELAY={c.scrape_min_delay_seconds}s\nCACHE_TTL={c.cache_ttl_minutes} min\nLIVE_BATCH={c.live_batch_minutes} min / {c.live_batch_size} new\nSCRAPE_INTERVAL={c.scrape_interval_minutes} min\nTODO_HOUR={c.todo_hour:02d}:00\nSchool mode: {'on' if self.school_mode else 'off'}\nVersion: {__version__}")
+            f"Config (no secrets shown):\nDATA_DIR={c.data_dir}\nQUIET_HOURS={c.quiet_hours_start:02d}:00–{c.quiet_hours_end:02d}:00\nSCRAPE_MIN_DELAY={c.scrape_min_delay_seconds}s\nCACHE_TTL={c.cache_ttl_minutes} min\nLIVE_BATCH={c.live_batch_minutes} min / {c.live_batch_size} new\nSCRAPE_INTERVAL={c.scrape_interval_minutes} min\nTODO_HOUR={c.todo_hour:02d}:00\nPLAYWRIGHT_ENABLED={'on' if getattr(c, 'playwright_enabled', True) else 'off'} · PLAYWRIGHT_HEADLESS={'on' if getattr(c, 'playwright_headless', False) else 'off'}\nSchool mode: {'on' if self.school_mode else 'off'}\nVersion: {__version__}")
 
     async def cmd_set(self, update, context):
         args = context.args or []
@@ -254,8 +254,9 @@ class JobilateBot:
         await update.message.reply_text("Copy this fixed text and send it yourself:\n\n" + txt)
 
     async def cmd_limits(self, update, context):
+        pw = getattr(self.config, 'playwright_enabled', True)
         await update.message.reply_text(
-            f"Limits:\n• Jiji scrape: ≥{self.config.scrape_min_delay_seconds:g}s between page loads, cache {self.config.cache_ttl_minutes} min\n• Public pages only, no login\n• Quiet hours {self.config.quiet_hours_start:02d}:00–{self.config.quiet_hours_end:02d}:00 (no live pushes then)\n• Live push: Tier1 immediate, rest batched {self.config.live_batch_minutes} min / {self.config.live_batch_size} new\n• Bot NEVER contacts candidates.")
+            f"Limits:\n• Jiji scrape: ≥{self.config.scrape_min_delay_seconds:g}s between page loads, cache {self.config.cache_ttl_minutes} min\n• Public pages only, no login\n• Quiet hours {self.config.quiet_hours_start:02d}:00–{self.config.quiet_hours_end:02d}:00 (no live pushes then)\n• Live push: Tier1 immediate, rest batched {self.config.live_batch_minutes} min / {self.config.live_batch_size} new\n• Turnstile fallback (Playwright): {'ON — on a challenge page, bot clicks Verify you are human once in its own browser' if pw else 'OFF (PLAYWRIGHT_ENABLED=0)'}\n• Bot NEVER contacts candidates.")
 
     async def cmd_school(self, update, context):
         arg = (context.args[0].lower() if context.args else "")
@@ -573,6 +574,9 @@ class JobilateBot:
         scraper = JijiScraper(
             min_delay=self.config.scrape_min_delay_seconds,
             cache_ttl_seconds=self.config.cache_ttl_minutes * 60,
+            playwright_enabled=getattr(self.config, 'playwright_enabled', True),
+            profile_dir=getattr(self.config, 'browser_profile_dir', '') or None,
+            data_dir=self.config.data_dir,
         )
         chat_id = update.effective_chat.id
         for v in targets:
@@ -1130,6 +1134,9 @@ class JobilateBot:
         scraper = JijiScraper(
             min_delay=self.config.scrape_min_delay_seconds,
             cache_ttl_seconds=self.config.cache_ttl_minutes * 60,
+            playwright_enabled=getattr(self.config, 'playwright_enabled', True),
+            profile_dir=getattr(self.config, 'browser_profile_dir', '') or None,
+            data_dir=self.config.data_dir,
         )
         per_vacancy, errors = scrape_all_active(self.store, scraper)
         for err in errors:
