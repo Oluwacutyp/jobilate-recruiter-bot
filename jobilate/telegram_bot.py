@@ -148,6 +148,76 @@ def _is_too_long_error(exc: BaseException) -> bool:
     return "too long" in str(exc).lower()
 
 
+# ---------------------------------------------------------------------------
+# Cloudflare-block notice dedupe + stale-cookie hint (2026-10-15).
+#
+# Durable-access finding: Jiji has NO public API that bypasses
+# Cloudflare for CV search. ``api_web/v1/listing`` exists for general
+# listings (third-party docs + an ``api_web/v1`` asset seen on jiji.ng),
+# but it lives on the SAME jiji.ng domain (same Cloudflare protection),
+# and its CV-search params were never verified with a real session —
+# so it is NOT wired in (an unverified guessed endpoint must not
+# become the first-try path). CF_CLEARANCE stays a band-aid: it worked
+# 2026-10-14 (54 candidates) and was stale again 2026-10-15 (new
+# vacancy, same "Just a moment..." block). Likely invalidation causes:
+# RDP IP change on restart, Cloudflare rotating/revoking the token
+# after automation detection, Edge refreshing the cookie, or a
+# User-Agent mismatch. The durable fix is operational: tell the
+# recruiter ONCE, clearly, that the cookie is stale (instead of
+# spamming the same block error), and never ask for a cookie over
+# Telegram (it would leak in chat history).
+# ---------------------------------------------------------------------------
+BLOCK_NOTICE_DEDUP_SECONDS = 300  # 5 min: same block -> one notice.
+
+
+def block_error_signature(err: str | None) -> str:
+    """Normalised signature for a Jiji block error (for dedupe).
+
+    Two errors that differ only by search URL / query / diag
+    (html_len, anchors) map to the SAME signature — e.g. the
+    2026-10-15 screenshot where one /scrape sent the identical
+    Cloudflare error twice. Non-block errors return their first
+    80 chars (lowercased, whitespace-collapsed) so distinct
+    failures are never deduped together.
+    """
+    s = " ".join(str(err or "").lower().split())
+    if "diag:" in s:
+        s = s.split("diag:", 1)[0]
+    # Strip the search URL (query varies per vacancy/category).
+    for marker in ("for https://", "for http://"):
+        if marker in s:
+            s = s.split(marker, 1)[0]
+    if "just a moment" in s or "cloudflare" in s:
+        return "cloudflare-block"
+    if "turnstile" in s or "verify you are human" in s or "verify you're human" in s:
+        return "turnstile-block"
+    if "403" in s:
+        return "http-403"
+    if "503" in s:
+        return "http-503"
+    return s[:80] or "unknown-error"
+
+
+def _stale_cookie_suffix() -> str:
+    """Suffix for a block notice when a saved cookie looks stale.
+
+    Only a hint, never the value. When no cookie is saved the
+    block error itself already says to solve in Edge + add
+    CF_CLEARANCE, so no suffix is needed.
+    """
+    try:
+        from .browser_fetch import cf_clearance_status
+
+        if cf_clearance_status().get("set"):
+            return (
+                " Saved cookie looks stale — solve in Edge on RDP, copy the new "
+                "cf_clearance into .env (no restart needed), then /scrape again."
+            )
+    except Exception:
+        pass
+    return ""
+
+
 async def send_to_recruiter(context, chat_id, text: str, admin_chat_id: str, **kwargs):
     """The ONLY outbound-send helper. Guarded to the recruiter chat.
 
@@ -235,6 +305,30 @@ class JobilateBot:
         self.store = store
         self.live_queue = LivePushQueue(batch_minutes=config.live_batch_minutes, batch_size=config.live_batch_size)
         self.school_mode = False
+        # Last time (monotonic) a block notice with a given signature was
+        # sent — see _should_send_block_notice (5-min dedupe).
+        self._last_block_notice: dict[str, float] = {}
+
+    def _should_send_block_notice(self, sig: str) -> bool:
+        """True if a block notice with this signature may be sent now.
+
+        Same signature within 5 min -> suppressed (the first notice
+        already told the recruiter). Distinct signatures are never
+        suppressed. Uses getattr so instances built without __init__
+        (tests) still work.
+        """
+        import time
+
+        d = getattr(self, "_last_block_notice", None)
+        if d is None:
+            d = {}
+            self._last_block_notice = d
+        now = time.monotonic()
+        last = d.get(sig)
+        if last is not None and now - last < BLOCK_NOTICE_DEDUP_SECONDS:
+            return False
+        d[sig] = now
+        return True
 
     # ---- generic helpers ----
     def _admin(self, update) -> str:
@@ -705,13 +799,23 @@ class JobilateBot:
             data_dir=self.config.data_dir,
         )
         chat_id = update.effective_chat.id
+        # Per-invocation dedupe: several vacancies hitting the SAME
+        # Cloudflare block used to send the identical error once per
+        # vacancy (screenshot 2026-10-15: same error twice in 1 min
+        # for one /scrape). The first notice already says it.
+        seen_block_sigs: set[str] = set()
         for v in targets:
             # Async-safe: sync scrape (may use Playwright Sync API) runs in
             # a worker thread via scrape_one_vacancy_async.
             new_links, err = await scrape_one_vacancy_async(self.store, v, scraper)
             if err:
+                sig = block_error_signature(err)
+                if sig in seen_block_sigs or not self._should_send_block_notice(sig):
+                    continue
+                seen_block_sigs.add(sig)
                 err_short = err if len(err) <= 500 else err[:500] + "..."
-                await update.message.reply_text(f"Jiji blocked, retrying later: {err_short}")
+                suffix = _stale_cookie_suffix() if sig in ("cloudflare-block", "turnstile-block") else ""
+                await update.message.reply_text(f"Jiji blocked, retrying later: {err_short}{suffix}")
                 continue
             if not new_links:
                 await update.message.reply_text(f"No new matches for {v.label()} this run.")
@@ -1304,8 +1408,9 @@ class JobilateBot:
             if getattr(self, "_last_scrape_error_hour", None) != hour_key:
                 self._last_scrape_error_hour = hour_key
                 err_short = err if len(err) <= 500 else err[:500] + "..."
+                suffix = _stale_cookie_suffix() if block_error_signature(err) in ("cloudflare-block", "turnstile-block") else ""
                 try:
-                    await send_to_recruiter(context, chat_id, f"Jiji blocked, retrying later: {err_short}", self.config.admin_chat_id)
+                    await send_to_recruiter(context, chat_id, f"Jiji blocked, retrying later: {err_short}{suffix}", self.config.admin_chat_id)
                 except Exception:  # noqa: BLE001 - notify failure must not kill the loop
                     pass
         for vid, new_links in per_vacancy.items():

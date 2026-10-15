@@ -205,6 +205,39 @@ browser fallback — in `asyncio.to_thread` (a worker thread with no
 running loop) via `scrape_one_vacancy_async` / `scrape_all_active_async`
 / `JijiScraper.fetch_async`. Sync callers keep the sync versions.
 
+### Durable access (2026-10-15): is there an API that bypasses Cloudflare?
+
+**Finding: no verified bypass.** Jiji publishes no public API for CV
+search. An `api_web/v1/listing` JSON endpoint exists for *general*
+listings (third-party project docs; an `api_web/v1` asset is also
+served on jiji.ng itself), but it lives on the **same** jiji.ng
+domain — same Cloudflare protection — and its CV-search parameters
+were never verified with a real session. An unverified guessed
+endpoint is deliberately NOT wired in as a first-try path. The
+durable fix is therefore operational, not a new endpoint:
+
+- **CF_CLEARANCE is a band-aid, not durable.** It worked 2026-10-14
+  (54 candidates for Sales Supervisor) and was stale again 2026-10-15
+  (new "Spa therapist" vacancy, same "Just a moment..." block).
+  Likely invalidation causes: RDP IP change on restart, Cloudflare
+  rotating/revoking the token after automation detection, Edge
+  refreshing the cookie, or a User-Agent mismatch.
+- **When the saved cookie is stale**, the block notice now says so
+  explicitly: "Saved cookie looks stale — solve in Edge on RDP, copy
+  the new cf_clearance into .env (no restart needed), then /scrape
+  again." The bot never asks for a cookie over Telegram (it would
+  leak in chat history) — refresh is via `.env` on the RDP only.
+- **No more duplicate block spam.** One `/scrape` over several
+  vacancies that all hit the same Cloudflare block used to send the
+  identical error once per vacancy (same error twice in 1 min,
+  2026-10-15). Now: one notice per block signature per `/scrape`,
+  and the same block is not re-sent within 5 minutes. The scheduled
+  loop still throttles block notices to one per hour.
+- **If blocks keep recurring**, the durable options are: run the bot
+  from a residential IP instead of the AWS datacenter RDP (Cloudflare
+  is far less strict there), or accept the cookie-refresh cycle
+  (solve in Edge → update `.env` → no restart) as routine upkeep.
+
 Error classification: a "Just a moment..." / "Checking your browser"
 page is reported as a Cloudflare block (with a short diagnostic:
 `diag: title=... anchors=N html_len=N flags=...`), NEVER as "page
