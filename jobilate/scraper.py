@@ -9,8 +9,11 @@ like 'no CVs'. The bot NEVER contacts sellers/candidates on Jiji.
 """
 from __future__ import annotations
 
+import logging
 import re
 import time
+
+log = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -263,8 +266,15 @@ class JijiScraper:
         # solved it (same browser + same RDP + same UA) or Cloudflare
         # may reject the cookie.
         headers = {"User-Agent": USER_AGENT}
+        proxies = None
         try:
-            from .browser_fetch import jiji_user_agent, read_cf_bm, read_cf_clearance
+            from .browser_fetch import (
+                _proxy_log_label,
+                jiji_user_agent,
+                read_cf_bm,
+                read_cf_clearance,
+                requests_proxies,
+            )
 
             headers["User-Agent"] = jiji_user_agent(getattr(self, "dotenv_path", None))
             clearance = read_cf_clearance(getattr(self, "dotenv_path", None))
@@ -278,14 +288,45 @@ class JijiScraper:
                 cookie_parts.append("__cf_bm=" + bm)
             if cookie_parts:
                 headers["Cookie"] = "; ".join(cookie_parts)
+            # Residential proxy (PROXY_URL, re-read each scrape). When
+            # unset, requests runs exactly as before (direct, no proxy
+            # kwarg). The proxy URL itself is NEVER logged.
+            proxies = requests_proxies(getattr(self, "dotenv_path", None))
+            proxy_label = _proxy_log_label(getattr(self, "dotenv_path", None))
         except Exception:
-            pass
+            proxies = None
+            proxy_label = "proxy"
+        # Requests through the proxy (when set), with ONE direct
+        # fallback per URL when the proxy fails (connection error,
+        # timeout, 407 auth, or a 502/503 from the proxy). A proxy
+        # that failed auth is NEVER retried with the cookie through
+        # that proxy — the retry goes direct.
+        req_kwargs: dict = {"headers": headers, "timeout": 30}
+        if proxies:
+            req_kwargs["proxies"] = proxies
         try:
-            resp = requests.get(url, headers=headers, timeout=30)
+            resp = requests.get(url, **req_kwargs)
         except Exception as exc:
-            raise JijiScrapeError(
-                f"Jiji fetch failed for {truncate_url(url)}: {truncate_error_text(str(exc), 300)}"
-            ) from exc
+            if not proxies:
+                raise JijiScrapeError(
+                    f"Jiji fetch failed for {truncate_url(url)}: {truncate_error_text(str(exc), 300)}"
+                ) from exc
+            log.info("proxy failed, falling back to direct (%s)", proxy_label)
+            try:
+                resp = requests.get(url, headers=headers, timeout=30)
+            except Exception as exc2:
+                raise JijiScrapeError(
+                    f"Jiji fetch failed for {truncate_url(url)}: {truncate_error_text(str(exc2), 300)}"
+                ) from exc2
+        if proxies and resp.status_code in (407, 502, 503):
+            # Proxy-level failure, not a Jiji block — go direct once.
+            log.info("proxy failed, falling back to direct (%s)", proxy_label)
+            try:
+                resp = requests.get(url, headers=headers, timeout=30)
+            except Exception as exc:
+                raise JijiScrapeError(
+                    f"Jiji fetch failed for {truncate_url(url)}: {truncate_error_text(str(exc), 300)}"
+                ) from exc
         if resp.status_code in (403, 503) or _is_challenge_text(resp.text):
             if _is_cloudflare_challenge_html(resp.text):
                 raise JijiScrapeError(

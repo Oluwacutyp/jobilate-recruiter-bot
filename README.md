@@ -101,6 +101,7 @@ chain with more than one fallback (user-approved 2026-10-14):
 
 1. **requests + CF_CLEARANCE + Edge UA** — the fast path. If
    `CF_CLEARANCE` is set in `.env`, requests sends it as a cookie
+   (through `PROXY_URL` when a residential proxy is set, else direct)
    (plus `__cf_bm` when optional `CF_BM` is also set — same Edge
    Settings page, name `__cf_bm`) with the Edge User-Agent (same
    browser + same RDP + same UA that solved it, or Cloudflare may
@@ -258,6 +259,47 @@ durable fix is therefore operational, not a new endpoint:
   is far less strict there), or accept the cookie-refresh cycle
   (solve in Edge → update `.env` → no restart) as routine upkeep.
 
+### Residential proxy (`PROXY_URL`) — the durable fix for datacenter-IP blocks
+
+User-verified 2026-10-16: fresh `CF_CLEARANCE` + mobile fallback
+STILL blocked. The root cause is IP reputation — the AWS datacenter
+IP is flagged by Cloudflare, and a mobile UA from a datacenter IP is
+still a datacenter IP. A residential proxy makes the bot's traffic
+come from a real home IP instead of AWS.
+
+```text
+PROXY_URL=http://user:pass@host:port
+```
+
+Formats: `http://…`, `https://…`, `socks5://…`, with or without
+`user:pass@` auth. `HTTP_PROXY` / `HTTPS_PROXY` work as aliases
+(`PROXY_URL` wins if both are set). The value is re-read from `.env`
+on EVERY scrape (no restart needed), and is **never logged, never
+in errors, never in `/config`** — `/config` shows only
+`PROXY: set (host <host>)` or `NOT SET`, never the URL or password.
+
+How it behaves:
+- **requests path:** sends through the proxy; if the proxy fails
+  (connection error, timeout, 407 auth, 502/503 from the proxy),
+  falls back to **direct once** per URL. A proxy that failed auth
+  is never retried with the cookie through that proxy.
+- **Playwright paths (desktop + mobile):** launches with
+  `proxy={server: PROXY_URL}`; if the proxy launch fails, falls
+  back to a **direct launch** (no proxy).
+- **Unset:** behaviour is exactly as before (direct, no proxy).
+
+How to get a residential IP:
+- **Self-hosted home proxy (free):** a PC / Raspberry Pi / phone at
+  home in Nigeria, always on, running a tiny proxy (SSH tunnel,
+  Squid, or Tailscale) — the bot on the RDP connects through it and
+  appears as a real Nigerian home user. Best free option if you
+  have that device.
+- **Paid residential provider:** a small residential-proxy plan
+  (real ISP IPs, not datacenter). A cheap datacenter proxy does NOT
+  help — Cloudflare flags datacenter IPs, and shared proxy IPs are
+  often already flagged. Never send `CF_CLEARANCE` through an
+  untrusted proxy: a malicious proxy can steal the session cookie.
+
 Error classification: a "Just a moment..." / "Checking your browser"
 page is reported as a Cloudflare block (with a short diagnostic:
 `diag: title=... anchors=N html_len=N flags=...`), NEVER as "page
@@ -352,6 +394,7 @@ No candidate messaging exists on any platform.
 | `BROWSER_PERSISTENT_PROFILE` | `1` = use the persistent profile (legacy, can hit profile-lock); unset/0 = ephemeral context (default, no lock) |
 | `CF_CLEARANCE` | Human-verified Cloudflare cookie from Edge (re-read from `.env` each scrape, no restart needed; expires ~30min–2h; never logged) |
 | `CF_BM` | Optional Cloudflare `__cf_bm` cookie from Edge (same Settings page; sent alongside `cf_clearance` in requests + browser; never logged) |
+| `PROXY_URL` | Residential proxy (`http(s)://` or `socks5://`, optional `user:pass@` auth; re-read from `.env` each scrape; never logged; falls back to direct once when the proxy fails). `HTTP_PROXY` / `HTTPS_PROXY` are aliases (`PROXY_URL` wins) |
 | `JIJI_USER_AGENT` | UA for both requests + Playwright (default: Edge UA — must match the Edge that solved the cookie) |
 | `SCRAPE_INTERVAL_MINUTES` | Auto-scrape loop interval (default 30, min 5) |
 | `TODO_HOUR` | Hour the morning to-do is auto-sent (default 8) |

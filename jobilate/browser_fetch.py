@@ -176,6 +176,126 @@ def cf_bm_value(dotenv_path: str | None = None) -> str:
     return read_cf_bm(dotenv_path)
 
 
+# ---------------------------------------------------------------------------
+# Residential proxy (PROXY_URL) — ADDITIVE (2026-10-17).
+#
+# User-verified: fresh CF_CLEARANCE + mobile fallback STILL blocked
+# (2026-10-15/16). Root cause is IP reputation: the AWS datacenter IP
+# is flagged by Cloudflare, and a mobile UA from a datacenter IP is
+# still a datacenter IP. The durable fix is a residential IP — a
+# self-hosted home proxy or a paid residential provider — so the
+# bot's traffic comes from a real home IP instead of AWS.
+#
+# PROXY_URL is re-read from the .env FILE on every scrape (same as
+# CF_CLEARANCE — no restart needed). PROXY_URL wins over the
+# HTTP_PROXY / HTTPS_PROXY aliases. When unset, behaviour is EXACTLY
+# as before (direct, no proxy). The proxy URL (which may contain a
+# username/password) is NEVER logged, NEVER in errors, NEVER in
+# /config — only the host + scheme are ever shown.
+# ---------------------------------------------------------------------------
+_PROXY_KEYS: tuple[str, ...] = ("PROXY_URL", "HTTP_PROXY", "HTTPS_PROXY")
+
+
+def _normalize_proxy_url(raw: str) -> str:
+    """Strip + add an http:// scheme when the user omitted one.
+
+    "user:pass@host:port" -> "http://user:pass@host:port".
+    Returns "" for an empty value. The result may contain
+    credentials — callers must NEVER log it.
+    """
+    url = (raw or "").strip()
+    if not url:
+        return ""
+    if "://" not in url:
+        url = "http://" + url
+    return url
+
+
+def read_proxy_url(dotenv_path: str | None = None) -> str:
+    """Proxy URL, re-read from .env file each scrape (no restart needed).
+
+    Precedence: PROXY_URL (.env file, then os.environ) wins over
+    HTTP_PROXY, which wins over HTTPS_PROXY. Returns the normalised
+    URL (with credentials, if any) or "" when no proxy is set.
+    NEVER log the return value.
+    """
+    for key in _PROXY_KEYS:
+        from_file = _read_dotenv_value(key, dotenv_path)
+        if from_file:
+            return _normalize_proxy_url(from_file)
+        env_val = os.environ.get(key, "").strip()
+        if env_val:
+            return _normalize_proxy_url(env_val)
+    return ""
+
+
+def proxy_status(dotenv_path: str | None = None) -> dict:
+    """Proxy diagnostics WITHOUT credentials (safe for /config + logs).
+
+    Returns {"set": bool, "host": str, "scheme": str, "source": str}.
+    "host" is the hostname only (no user/pass/port). "source" is
+    ".env file" / "environment" / "". The proxy URL itself is never
+    returned, logged, or put in errors.
+    """
+    from urllib.parse import urlparse
+
+    for key in _PROXY_KEYS:
+        from_file = _read_dotenv_value(key, dotenv_path)
+        if from_file:
+            parsed = urlparse(_normalize_proxy_url(from_file))
+            return {"set": True, "host": parsed.hostname or "",
+                    "scheme": parsed.scheme or "",
+                    "source": ".env file"}
+        env_val = os.environ.get(key, "").strip()
+        if env_val:
+            parsed = urlparse(_normalize_proxy_url(env_val))
+            return {"set": True, "host": parsed.hostname or "",
+                    "scheme": parsed.scheme or "",
+                    "source": "environment"}
+    return {"set": False, "host": "", "scheme": "", "source": ""}
+
+
+def proxy_config_line(dotenv_path: str | None = None) -> str:
+    """One /config line for the proxy — host only, never credentials."""
+    st = proxy_status(dotenv_path)
+    if st["set"]:
+        host = st["host"] or "unknown host"
+        return f"PROXY: set (host {host}, from {st['source']})"
+    return "PROXY: NOT SET (direct connection; set PROXY_URL in .env for a residential proxy)"
+
+
+def requests_proxies(dotenv_path: str | None = None) -> dict | None:
+    """proxies dict for requests.get/post, or None (direct, unchanged).
+
+    {"http": url, "https": url} when PROXY_URL (or alias) is set.
+    The URLs may contain credentials — NEVER log this dict.
+    """
+    url = read_proxy_url(dotenv_path)
+    if not url:
+        return None
+    return {"http": url, "https": url}
+
+
+def _playwright_proxy(dotenv_path: str | None = None) -> dict | None:
+    """proxy dict for Playwright launch, or None (direct, unchanged).
+
+    {"server": url} — Playwright supports http/https/socks5, with
+    auth in the URL. The URL may contain credentials — NEVER log it.
+    """
+    url = read_proxy_url(dotenv_path)
+    if not url:
+        return None
+    return {"server": url}
+
+
+def _proxy_log_label(dotenv_path: str | None = None) -> str:
+    """Safe log label for proxy failures: 'host <host> (<scheme>)'."""
+    st = proxy_status(dotenv_path)
+    if not st["set"]:
+        return "proxy"
+    return f"proxy (host {st['host'] or 'unknown host'}, scheme {st['scheme'] or 'http'})"
+
+
 def _cloudflare_cookies(dotenv_path: str | None = None, with_cookie: bool = True) -> list[dict]:
     """Cloudflare cookies to inject into a browser context (values never logged).
 
@@ -508,26 +628,35 @@ def _launch_persistent_context(p, profile: str, dotenv_path: str | None = None):
     """
     os.makedirs(profile, exist_ok=True)
     _clean_stale_profile_locks(profile)
+    # Proxy passes: with proxy first (when set), then ONE direct pass.
+    # The proxy URL is never logged — only the safe host/scheme label.
+    proxy = _playwright_proxy(dotenv_path)
+    passes: list[dict | None] = [proxy, None] if proxy else [None]
     last_exc: Exception | None = None
-    for channel in BROWSER_CHANNELS:
-        kwargs: dict = dict(
-            user_data_dir=profile,
-            headless=playwright_headless(),
-            viewport=dict(DESKTOP_VIEWPORT),
-            locale="en-NG",
-            user_agent=jiji_user_agent(dotenv_path),
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        if channel is not None:
-            kwargs["channel"] = channel
-        try:
-            ctx = p.chromium.launch_persistent_context(**kwargs)
-            log.debug("browser launch: persistent context, channel=%s", channel or "chromium")
-            return ctx, channel or "chromium"
-        except Exception as exc:  # noqa: BLE001 - try next channel
-            log.debug("browser launch failed for channel=%s: %s", channel or "chromium", str(exc)[:200])
-            last_exc = exc
-            continue
+    for pass_idx, proxy_opt in enumerate(passes):
+        if pass_idx == 1:
+            log.info("proxy failed, falling back to direct (%s)", _proxy_log_label(dotenv_path))
+        for channel in BROWSER_CHANNELS:
+            kwargs: dict = dict(
+                user_data_dir=profile,
+                headless=playwright_headless(),
+                viewport=dict(DESKTOP_VIEWPORT),
+                locale="en-NG",
+                user_agent=jiji_user_agent(dotenv_path),
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            if proxy_opt is not None:
+                kwargs["proxy"] = proxy_opt
+            if channel is not None:
+                kwargs["channel"] = channel
+            try:
+                ctx = p.chromium.launch_persistent_context(**kwargs)
+                log.debug("browser launch: persistent context, channel=%s", channel or "chromium")
+                return ctx, channel or "chromium"
+            except Exception as exc:  # noqa: BLE001 - try next channel
+                log.debug("browser launch failed for channel=%s: %s", channel or "chromium", str(exc)[:200])
+                last_exc = exc
+                continue
     raise last_exc if last_exc is not None else RuntimeError("Playwright launch failed")
 
 
@@ -542,22 +671,31 @@ def _launch_ephemeral_browser(p, dotenv_path: str | None = None):
     """
     channels_tried: list[str] = []
     last_exc: Exception | None = None
-    for channel in BROWSER_CHANNELS:
-        channels_tried.append(channel or "chromium")
-        kwargs: dict = dict(
-            headless=playwright_headless(),
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        if channel is not None:
-            kwargs["channel"] = channel
-        try:
-            browser = p.chromium.launch(**kwargs)
-            log.debug("browser launch: ephemeral, channel=%s", channel or "chromium")
-            return browser, channel or "chromium", channels_tried
-        except Exception as exc:  # noqa: BLE001 - try next channel
-            log.debug("browser launch failed for channel=%s: %s", channel or "chromium", str(exc)[:200])
-            last_exc = exc
-            continue
+    # Proxy passes: with proxy first (when set), then ONE direct pass.
+    # The proxy URL is never logged — only the safe host/scheme label.
+    proxy = _playwright_proxy(dotenv_path)
+    passes: list[dict | None] = [proxy, None] if proxy else [None]
+    for pass_idx, proxy_opt in enumerate(passes):
+        if pass_idx == 1:
+            log.info("proxy failed, falling back to direct (%s)", _proxy_log_label(dotenv_path))
+        for channel in BROWSER_CHANNELS:
+            channels_tried.append(channel or "chromium")
+            kwargs: dict = dict(
+                headless=playwright_headless(),
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            if proxy_opt is not None:
+                kwargs["proxy"] = proxy_opt
+            if channel is not None:
+                kwargs["channel"] = channel
+            try:
+                browser = p.chromium.launch(**kwargs)
+                log.debug("browser launch: ephemeral, channel=%s", channel or "chromium")
+                return browser, channel or "chromium", channels_tried
+            except Exception as exc:  # noqa: BLE001 - try next channel
+                log.debug("browser launch failed for channel=%s: %s", channel or "chromium", str(exc)[:200])
+                last_exc = exc
+                continue
     raise last_exc if last_exc is not None else RuntimeError("Playwright launch failed")
 
 

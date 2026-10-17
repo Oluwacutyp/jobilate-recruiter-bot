@@ -422,6 +422,7 @@ class JobilateBot:
                 BROWSER_CHANNELS,
                 cf_clearance_status,
                 jiji_user_agent,
+                proxy_config_line,
             )
 
             cf = cf_clearance_status(getattr(getattr(self, "scraper", None), "dotenv_path", None))
@@ -432,13 +433,16 @@ class JobilateBot:
             ua_line = f"JIJI_USER_AGENT: {jiji_user_agent(getattr(getattr(self, 'scraper', None), 'dotenv_path', None))}"
             env_line = f".env path checked: {cf['env_path']}"
             channels_line = "BROWSER_CHANNELS: " + " → ".join(ch or "Chromium" for ch in BROWSER_CHANNELS)
+            # Proxy diagnostics — host only, NEVER the URL / credentials.
+            proxy_line = proxy_config_line(getattr(getattr(self, "scraper", None), "dotenv_path", None))
         except Exception:
             cf_line = "CF_CLEARANCE: (diagnostics unavailable)"
             ua_line = "JIJI_USER_AGENT: (diagnostics unavailable)"
             env_line = ".env path checked: (diagnostics unavailable)"
             channels_line = "BROWSER_CHANNELS: msedge → chrome → Chromium"
+            proxy_line = "PROXY: (diagnostics unavailable)"
         await update.message.reply_text(
-            f"Config (no secrets shown):\nDATA_DIR={c.data_dir}\nQUIET_HOURS={c.quiet_hours_start:02d}:00–{c.quiet_hours_end:02d}:00\nSCRAPE_MIN_DELAY={c.scrape_min_delay_seconds}s\nCACHE_TTL={c.cache_ttl_minutes} min\nLIVE_BATCH={c.live_batch_minutes} min / {c.live_batch_size} new\nSCRAPE_INTERVAL={c.scrape_interval_minutes} min\nTODO_HOUR={c.todo_hour:02d}:00\nPLAYWRIGHT_ENABLED={'on' if getattr(c, 'playwright_enabled', True) else 'off'} · PLAYWRIGHT_HEADLESS={'on' if getattr(c, 'playwright_headless', False) else 'off'}\n{cf_line}\n{ua_line}\n{env_line}\n{channels_line}\nSchool mode: {'on' if self.school_mode else 'off'}\nVersion: {__version__}")
+            f"Config (no secrets shown):\nDATA_DIR={c.data_dir}\nQUIET_HOURS={c.quiet_hours_start:02d}:00–{c.quiet_hours_end:02d}:00\nSCRAPE_MIN_DELAY={c.scrape_min_delay_seconds}s\nCACHE_TTL={c.cache_ttl_minutes} min\nLIVE_BATCH={c.live_batch_minutes} min / {c.live_batch_size} new\nSCRAPE_INTERVAL={c.scrape_interval_minutes} min\nTODO_HOUR={c.todo_hour:02d}:00\nPLAYWRIGHT_ENABLED={'on' if getattr(c, 'playwright_enabled', True) else 'off'} · PLAYWRIGHT_HEADLESS={'on' if getattr(c, 'playwright_headless', False) else 'off'}\n{cf_line}\n{ua_line}\n{env_line}\n{channels_line}\n{proxy_line}\nSchool mode: {'on' if self.school_mode else 'off'}\nVersion: {__version__}")
 
     async def cmd_set(self, update, context):
         args = context.args or []

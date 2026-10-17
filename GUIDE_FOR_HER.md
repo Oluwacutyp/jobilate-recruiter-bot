@@ -167,7 +167,8 @@ If it says "Jiji blocked, retrying later" or "Cloudflare 'Just a
 moment...' challenge", just wait. It retries by itself. You can also
 send `/scrape 1` to try again. `/config` tells you if the cookie is
 set — if it says NOT SET, check the `.env` filename (it must be
-exactly `.env`, not `.env.txt`).
+exactly `.env`, not `.env.txt`). Bot can use a residential proxy if
+one is set — ask the person who set up the bot.
 
 ## 10. If something looks wrong
 
