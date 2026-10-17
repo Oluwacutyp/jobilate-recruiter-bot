@@ -127,11 +127,21 @@ def test_browser_uses_msedge_channel_first(tmp_path):
         def add_cookies(self, cookies):
             seen["cookies"] = cookies
 
-    class _FakeChromium:
-        def launch_persistent_context(self, **kw):
-            seen.setdefault("channels", []).append(kw.get("channel"))
+    class _FakeBrowser:
+        def new_context(self, **kw):
             seen["user_agent"] = kw.get("user_agent")
             return _FakeCtx()
+
+        def close(self):
+            return None
+
+    class _FakeChromium:
+        def launch(self, **kw):
+            seen.setdefault("channels", []).append(kw.get("channel"))
+            return _FakeBrowser()
+
+        def launch_persistent_context(self, **kw):
+            raise AssertionError("ephemeral context must be used by default")
 
     class _FakePlaywright:
         def __enter__(self):
@@ -198,9 +208,19 @@ def test_cf_clearance_set_in_browser_context(tmp_path):
         def add_cookies(self, cookies):
             seen["cookies"] = cookies
 
-    class _FakeChromium:
-        def launch_persistent_context(self, **kw):
+    class _FakeBrowser:
+        def new_context(self, **kw):
             return _FakeCtx()
+
+        def close(self):
+            return None
+
+    class _FakeChromium:
+        def launch(self, **kw):
+            return _FakeBrowser()
+
+        def launch_persistent_context(self, **kw):
+            raise AssertionError("ephemeral context must be used by default")
 
     class _FakePlaywright:
         def __enter__(self):
@@ -285,9 +305,19 @@ def test_browser_waits_for_challenge_to_clear(tmp_path):
         def add_cookies(self, cookies):
             pass
 
-    class _FakeChromium:
-        def launch_persistent_context(self, **kw):
+    class _FakeBrowser:
+        def new_context(self, **kw):
             return _FakeCtx()
+
+        def close(self):
+            return None
+
+    class _FakeChromium:
+        def launch(self, **kw):
+            return _FakeBrowser()
+
+        def launch_persistent_context(self, **kw):
+            raise AssertionError("ephemeral context must be used by default")
 
     class _FakePlaywright:
         def __enter__(self):

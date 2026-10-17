@@ -264,12 +264,20 @@ class JijiScraper:
         # may reject the cookie.
         headers = {"User-Agent": USER_AGENT}
         try:
-            from .browser_fetch import jiji_user_agent, read_cf_clearance
+            from .browser_fetch import jiji_user_agent, read_cf_bm, read_cf_clearance
 
             headers["User-Agent"] = jiji_user_agent(getattr(self, "dotenv_path", None))
             clearance = read_cf_clearance(getattr(self, "dotenv_path", None))
+            bm = read_cf_bm(getattr(self, "dotenv_path", None))
+            # CF_CLEARANCE is required, __cf_bm (CF_BM in .env) is
+            # optional — sent alongside when present. Values never logged.
+            cookie_parts = []
             if clearance:
-                headers["Cookie"] = "cf_clearance=" + clearance
+                cookie_parts.append("cf_clearance=" + clearance)
+            if bm:
+                cookie_parts.append("__cf_bm=" + bm)
+            if cookie_parts:
+                headers["Cookie"] = "; ".join(cookie_parts)
         except Exception:
             pass
         try:

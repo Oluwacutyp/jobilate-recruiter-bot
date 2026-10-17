@@ -101,22 +101,42 @@ chain with more than one fallback (user-approved 2026-10-14):
 
 1. **requests + CF_CLEARANCE + Edge UA** — the fast path. If
    `CF_CLEARANCE` is set in `.env`, requests sends it as a cookie
-   with the Edge User-Agent (same browser + same RDP + same UA that
-   solved it, or Cloudflare may reject the cookie).
+   (plus `__cf_bm` when optional `CF_BM` is also set — same Edge
+   Settings page, name `__cf_bm`) with the Edge User-Agent (same
+   browser + same RDP + same UA that solved it, or Cloudflare may
+   reject the cookie).
 2. **Playwright real Microsoft Edge + stealth + CF_CLEARANCE** — on a
-   challenge/block page, the bot falls back ONCE per URL to real Edge
-   (`channel="msedge"`, fallback Chrome → Chromium if Edge is not
-   installed), with a stealth init script (hides `navigator.webdriver`,
-   spoofs `window.chrome` / plugins / languages / permissions — no
-   solving services, no token forgery), small human-like behaviour
-   (pause, mouse move, slow scroll), and the `cf_clearance` cookie in
-   the browser context. It clicks the Turnstile checkbox if one is
+   challenge/block page, the bot tries, in order, up to 4 browser
+   attempts per URL (first success wins, 1s pacing between attempts):
+   desktop Edge + cookie, desktop Edge without cookie (fresh session),
+   **mobile emulation (Pixel 7 UA / 412x915 / touch) + cookie**, and
+   mobile without cookie — Cloudflare treats mobile traffic
+   differently, so mobile sometimes passes where desktop fails. Each
+   attempt uses real Edge (`channel="msedge"`, fallback Chrome →
+   Chromium if Edge is not installed; the error names the channels
+   actually tried — never silently claiming Edge ran when Chromium
+   did), a stealth init script (hides `navigator.webdriver`, spoofs
+   `window.chrome` / plugins / languages / permissions — no solving
+   services, no token forgery), small human-like behaviour (pause,
+   mouse move, slow scroll), and the Cloudflare cookies in the
+   browser context. It clicks the Turnstile checkbox if one is
    present, and polls up to 30s for the automatic "Just a moment..."
    check to clear (there is nothing to click on that page — the
    browser must pass the automatic check).
-3. **Clear human handoff error** — if both fail: "Cloudflare 'Just a
-   moment...' challenge — solve in Edge, update CF_CLEARANCE in
-   .env, retry." Never a fake result.
+3. **Clear human handoff error** — if all attempts fail: "Cloudflare
+   'Just a moment...' challenge — solve in Edge, update CF_CLEARANCE
+   in .env, retry." Never a fake result.
+
+**Profile lock fixed (2026-10-16):** the browser fallback used to
+use a persistent profile dir (`data/browser_profile`), and a zombie
+previous scrape left a `SingletonLock` — "profile is already in use
+by another instance of Chromium" — after which it silently fell back
+to bundled Chromium. It now uses an **ephemeral context** (launch +
+`new_context`, no profile dir, no lock file) by default. The old
+persistent profile is only used when `BROWSER_PERSISTENT_PROFILE=1`
+is set explicitly, and then stale `Singleton*` lock files are cleaned
+first. Close extra Edge windows on the RDP before scraping to reduce
+lock contention further.
 
 Why real Edge, not Playwright's Chromium? User-verified 2026-10-14:
 same RDP, same IP — real Edge passes Cloudflare, bot's Playwright
@@ -328,8 +348,10 @@ No candidate messaging exists on any platform.
 | `CACHE_TTL_MINUTES` | Jiji page cache (default 15) |
 | `PLAYWRIGHT_ENABLED` | Browser fallback (default 1, 0 = requests only) |
 | `PLAYWRIGHT_HEADLESS` | 0 = headed (default on Windows), 1 = headless |
-| `BROWSER_PROFILE_DIR` | Verified browser session (default `DATA_DIR/browser_profile`) |
+| `BROWSER_PROFILE_DIR` | Legacy persistent browser profile (default `DATA_DIR/browser_profile`) — only used when `BROWSER_PERSISTENT_PROFILE=1`; default is an ephemeral context (no lock file) |
+| `BROWSER_PERSISTENT_PROFILE` | `1` = use the persistent profile (legacy, can hit profile-lock); unset/0 = ephemeral context (default, no lock) |
 | `CF_CLEARANCE` | Human-verified Cloudflare cookie from Edge (re-read from `.env` each scrape, no restart needed; expires ~30min–2h; never logged) |
+| `CF_BM` | Optional Cloudflare `__cf_bm` cookie from Edge (same Settings page; sent alongside `cf_clearance` in requests + browser; never logged) |
 | `JIJI_USER_AGENT` | UA for both requests + Playwright (default: Edge UA — must match the Edge that solved the cookie) |
 | `SCRAPE_INTERVAL_MINUTES` | Auto-scrape loop interval (default 30, min 5) |
 | `TODO_HOUR` | Hour the morning to-do is auto-sent (default 8) |

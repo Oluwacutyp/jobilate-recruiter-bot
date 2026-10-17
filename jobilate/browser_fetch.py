@@ -23,17 +23,30 @@ So this fallback now (ADDITIVE — requests path unchanged):
   challenge to clear (it is an automatic JS check, NOT a checkbox
   click — there is nothing to click on that page);
 - optionally reuses a human-verified cf_clearance cookie from
-  CF_CLEARANCE (see README) — never logged, never in errors.
+  CF_CLEARANCE (see README) — never logged, never in errors;
+- uses an EPHEMERAL browser context by default (launch + new_context,
+  no persistent profile dir, so no SingletonLock "profile already in
+  use" errors from zombie instances). The old persistent profile is
+  only used when BROWSER_PERSISTENT_PROFILE=1 is set explicitly, and
+  then stale lock files are cleaned first;
+- if desktop Edge still gets "Just a moment...", tries a mobile
+  emulation pass (Pixel 7 UA / viewport / touch) with the cookie and
+  then without it — Cloudflare treats mobile traffic differently, so
+  mobile sometimes passes where desktop fails. Max 4 attempts total
+  per URL, with pacing; first success wins.
 
 On any Playwright failure this raises JijiScrapeError — never fakes
 results, never returns challenge HTML as if it were a listing.
 """
 from __future__ import annotations
 
+import logging
 import os
 import random
 import sys
 import time
+
+log = logging.getLogger(__name__)
 
 # Selectors tried in order to find the Turnstile checkbox.
 TURNSTILE_SELECTORS: list[str] = [
@@ -63,6 +76,27 @@ DEFAULT_USER_AGENT = (
 # Playwright channel fallback order: Edge (preinstalled on Windows RDP,
 # the browser the user solved in) -> Chrome -> bundled Chromium.
 BROWSER_CHANNELS: tuple[str | None, ...] = ("msedge", "chrome", None)
+
+# Mobile emulation (Pixel 7) for the mobile fallback pass. Same jiji.ng
+# URL, mobile UA/viewport/touch — Cloudflare treats mobile traffic
+# differently, so mobile sometimes passes where desktop fails.
+MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+)
+MOBILE_VIEWPORT: dict = {"width": 412, "height": 915}
+DESKTOP_VIEWPORT: dict = {"width": 1920, "height": 1080}
+
+# Filenames Playwright/Chromium leaves in a persistent profile dir that
+# lock it to one process ("profile is already in use"). Cleaned
+# best-effort only on the explicit persistent-profile path — never
+# deletes user data, only the lock files.
+_PROFILE_LOCK_FILES: tuple[str, ...] = (
+    "SingletonLock",
+    "SingletonCookie",
+    "SingletonSocket",
+    "SingletonSync",
+)
 
 
 def _dotenv_candidates(dotenv_path: str | None = None) -> list[str]:
@@ -120,6 +154,49 @@ def read_cf_clearance(dotenv_path: str | None = None) -> str:
     if from_file:
         return from_file
     return os.environ.get("CF_CLEARANCE", "").strip()
+
+
+def read_cf_bm(dotenv_path: str | None = None) -> str:
+    """Optional __cf_bm cookie, re-read from .env file each scrape.
+
+    __cf_bm is Cloudflare's bot-manager cookie (same Edge Settings
+    page as cf_clearance, name "__cf_bm"). Sent alongside cf_clearance
+    when present — it helps Cloudflare trust the session. Optional:
+    cf_clearance alone is the required one. NEVER logged, never in
+    errors. Set in .env as CF_BM=<value>.
+    """
+    from_file = _read_dotenv_value("CF_BM", dotenv_path)
+    if from_file:
+        return from_file
+    return os.environ.get("CF_BM", "").strip()
+
+
+def cf_bm_value(dotenv_path: str | None = None) -> str:
+    """Back-compat alias for read_cf_bm(). Never logged, never in errors."""
+    return read_cf_bm(dotenv_path)
+
+
+def _cloudflare_cookies(dotenv_path: str | None = None, with_cookie: bool = True) -> list[dict]:
+    """Cloudflare cookies to inject into a browser context (values never logged).
+
+    Returns [] when with_cookie is False or no cookie is saved. Otherwise
+    cf_clearance (+ __cf_bm when CF_BM is set) for .jiji.ng, plus
+    cf_clearance for .cloudflareinsights.com (as before).
+    """
+    if not with_cookie:
+        return []
+    cookies: list[dict] = []
+    clearance = read_cf_clearance(dotenv_path)
+    bm = read_cf_bm(dotenv_path)
+    if clearance:
+        cookies.append({"name": "cf_clearance", "value": clearance,
+                        "domain": ".jiji.ng", "path": "/"})
+        cookies.append({"name": "cf_clearance", "value": clearance,
+                        "domain": ".cloudflareinsights.com", "path": "/"})
+    if bm:
+        cookies.append({"name": "__cf_bm", "value": bm,
+                        "domain": ".jiji.ng", "path": "/"})
+    return cookies
 
 
 def jiji_user_agent(dotenv_path: str | None = None) -> str:
@@ -249,14 +326,28 @@ def _is_cloudflare_challenge_html(html: str, title: str = "") -> bool:
     return False
 
 
-def _cloudflare_error(url: str, title: str = "", anchors: int = -1, html_len: int = -1) -> Exception:
-    """Build the Cloudflare-block error (never includes HTML or cookies)."""
+def _cloudflare_error(url: str, title: str = "", anchors: int = -1, html_len: int = -1,
+                       channels_tried: list[str] | None = None,
+                       attempts_tried: list[str] | None = None) -> Exception:
+    """Build the Cloudflare-block error (never includes HTML or cookies).
+
+    channels_tried / attempts_tried are recorded so the error says
+    WHAT was actually tried (e.g. "channels tried: msedge, chromium;
+    attempts: desktop+cookie, mobile") — never silently claiming Edge
+    was used when Chromium was the one that ran.
+    """
     from .scraper import JijiScrapeError
 
+    suffix = ""
+    if channels_tried:
+        suffix += f" channels tried: {', '.join(channels_tried)}."
+    if attempts_tried:
+        suffix += f" attempts: {', '.join(attempts_tried)}."
     return JijiScrapeError(
         "Cloudflare 'Just a moment...' challenge — bot's browser was flagged "
         "as automated. Try real Edge profile / CF_CLEARANCE, or wait and retry. "
         f"for {_truncate_url(url)} diag: title={str(title)[:120]!r} anchors={anchors} html_len={html_len}"
+        + suffix
     )
 
 
@@ -374,19 +465,55 @@ def _truncate_url(url: str, limit: int = 120) -> str:
     return url[:limit] + "..."
 
 
+def use_persistent_profile() -> bool:
+    """True only when BROWSER_PERSISTENT_PROFILE=1 is set explicitly.
+
+    Default is the EPHEMERAL context (no profile dir, no lock file).
+    The persistent profile is a legacy opt-in — it is the only path
+    that can hit "profile is already in use" from a zombie instance.
+    """
+    return os.environ.get("BROWSER_PERSISTENT_PROFILE", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _clean_stale_profile_locks(profile: str) -> None:
+    """Delete stale Singleton* lock files in a persistent profile dir.
+
+    Best-effort only, and only on the explicit persistent-profile path.
+    Deletes lock files, never user data (no cookies/history/cache).
+    If a live Edge/Playwright instance still holds the profile, its
+    lock is recreated on next launch — cleaning a live lock is
+    harmless: the next launch either re-locks or reports "already
+    in use" again, which the channel fallback then handles.
+    """
+    for name in _PROFILE_LOCK_FILES:
+        try:
+            path = os.path.join(profile, name)
+            if os.path.isfile(path):
+                os.remove(path)
+        except Exception:
+            continue
+
+
 def _launch_persistent_context(p, profile: str, dotenv_path: str | None = None):
     """Launch persistent context: Edge -> Chrome -> Chromium.
 
+    LEGACY opt-in only (BROWSER_PERSISTENT_PROFILE=1). Stale lock
+    files are cleaned first so a zombie previous scrape cannot leave
+    a permanent "profile is already in use" error.
     Returns (ctx, channel_used). channel_used is "msedge" / "chrome" /
     "chromium" (default) — recorded for the log line, never the cookie.
     Raises the last error if all channels fail.
     """
+    os.makedirs(profile, exist_ok=True)
+    _clean_stale_profile_locks(profile)
     last_exc: Exception | None = None
     for channel in BROWSER_CHANNELS:
         kwargs: dict = dict(
             user_data_dir=profile,
             headless=playwright_headless(),
-            viewport={"width": 1920, "height": 1080},
+            viewport=dict(DESKTOP_VIEWPORT),
             locale="en-NG",
             user_agent=jiji_user_agent(dotenv_path),
             args=["--disable-blink-features=AutomationControlled"],
@@ -395,35 +522,97 @@ def _launch_persistent_context(p, profile: str, dotenv_path: str | None = None):
             kwargs["channel"] = channel
         try:
             ctx = p.chromium.launch_persistent_context(**kwargs)
+            log.debug("browser launch: persistent context, channel=%s", channel or "chromium")
             return ctx, channel or "chromium"
         except Exception as exc:  # noqa: BLE001 - try next channel
+            log.debug("browser launch failed for channel=%s: %s", channel or "chromium", str(exc)[:200])
             last_exc = exc
             continue
     raise last_exc if last_exc is not None else RuntimeError("Playwright launch failed")
 
 
-def fetch_with_browser(
+def _launch_ephemeral_browser(p, dotenv_path: str | None = None):
+    """Launch an EPHEMERAL browser (no profile dir, no lock file).
+
+    Tries channels msedge -> chrome -> Chromium. Returns
+    (browser, channel_used, channels_tried). channels_tried records
+    every channel actually attempted (for error messages — never
+    claim Edge ran when Chromium was the one that launched).
+    Raises the last launch error if all channels fail.
+    """
+    channels_tried: list[str] = []
+    last_exc: Exception | None = None
+    for channel in BROWSER_CHANNELS:
+        channels_tried.append(channel or "chromium")
+        kwargs: dict = dict(
+            headless=playwright_headless(),
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        if channel is not None:
+            kwargs["channel"] = channel
+        try:
+            browser = p.chromium.launch(**kwargs)
+            log.debug("browser launch: ephemeral, channel=%s", channel or "chromium")
+            return browser, channel or "chromium", channels_tried
+        except Exception as exc:  # noqa: BLE001 - try next channel
+            log.debug("browser launch failed for channel=%s: %s", channel or "chromium", str(exc)[:200])
+            last_exc = exc
+            continue
+    raise last_exc if last_exc is not None else RuntimeError("Playwright launch failed")
+
+
+def _new_ephemeral_context(browser, *, mobile: bool, with_cookie: bool,
+                           dotenv_path: str | None = None):
+    """Ephemeral context for one attempt (desktop or mobile).
+
+    Desktop: Edge UA + 1920x1080. Mobile: Pixel 7 UA + 412x915 +
+    has_touch + is_mobile. Stealth init script + Cloudflare cookies
+    (when with_cookie) are applied. Returns the context.
+    """
+    if mobile:
+        ctx = browser.new_context(
+            viewport=dict(MOBILE_VIEWPORT),
+            locale="en-NG",
+            user_agent=MOBILE_USER_AGENT,
+            has_touch=True,
+            is_mobile=True,
+        )
+    else:
+        ctx = browser.new_context(
+            viewport=dict(DESKTOP_VIEWPORT),
+            locale="en-NG",
+            user_agent=jiji_user_agent(dotenv_path),
+        )
+    try:
+        ctx.add_init_script(STEALTH_INIT_SCRIPT)
+    except Exception:
+        pass
+    cookies = _cloudflare_cookies(dotenv_path, with_cookie=with_cookie)
+    if cookies:
+        try:
+            ctx.add_cookies(cookies)
+        except Exception:
+            pass
+    return ctx
+
+
+def _fetch_with_browser_once(
     url: str,
     *,
+    mobile: bool,
+    with_cookie: bool,
+    timeout_seconds: int,
+    dotenv_path: str | None = None,
     profile_dir: str | None = None,
     data_dir: str = "./data",
-    timeout_seconds: int = 30,
-    dotenv_path: str | None = None,
     _playwright_factory=None,
-) -> str:
-    """Fetch a URL with REAL Edge (fallback Chrome -> Chromium).
+) -> tuple[str, list[str]]:
+    """ONE browser attempt (desktop/mobile x cookie/no-cookie).
 
-    Fallback chain (first-class, documented in README):
-      (1) requests + CF_CLEARANCE + Edge UA  [in scraper.fetch]
-      (2) Playwright real Edge + stealth + CF_CLEARANCE in context
-      (3) clear human handoff error ("solve in Edge, update
-          CF_CLEARANCE in .env, retry") — never a fake result.
-
-    Returns page HTML. Raises JijiScrapeError (from scraper) on any
-    failure. `_playwright_factory` exists for tests to inject a fake.
-    The CF_CLEARANCE value is NEVER logged and NEVER in errors.
+    Returns (html, channels_tried). Raises JijiScrapeError on challenge
+    / block / launch failure. Uses the ephemeral context by default;
+    the persistent profile only when BROWSER_PERSISTENT_PROFILE=1.
     """
-    # Local import so the module imports cleanly without Playwright.
     from .scraper import JijiScrapeError
 
     if _playwright_factory is None:
@@ -436,95 +625,186 @@ def fetch_with_browser(
             ) from exc
         _playwright_factory = sync_playwright
 
-    profile = profile_dir or default_profile_dir(data_dir)
-    os.makedirs(profile, exist_ok=True)
-    try:
-        with _playwright_factory() as p:
-            ctx, channel_used = _launch_persistent_context(p, profile, dotenv_path)
-            try:
-                # Stealth init script (best-effort; fakes may lack it).
+    channels_tried: list[str] = []
+    with _playwright_factory() as p:
+        browser = None
+        ctx = None
+        try:
+            if use_persistent_profile():
+                profile = profile_dir or default_profile_dir(data_dir)
+                ctx, channel_used = _launch_persistent_context(p, profile, dotenv_path)
+                channels_tried.append(channel_used)
+                # Stealth + cookies on the persistent context (as before).
                 try:
                     ctx.add_init_script(STEALTH_INIT_SCRIPT)
                 except Exception:
                     pass
-                # FIRST-CLASS fallback: human-verified cf_clearance cookie
-                # in the browser context (re-read from .env each scrape,
-                # so updating .env needs NO restart). Never logged.
-                clearance = read_cf_clearance(dotenv_path)
-                if clearance:
+                cookies = _cloudflare_cookies(dotenv_path, with_cookie=with_cookie)
+                if cookies:
                     try:
-                        ctx.add_cookies([
-                            {"name": "cf_clearance", "value": clearance,
-                             "domain": ".jiji.ng", "path": "/"},
-                            {"name": "cf_clearance", "value": clearance,
-                             "domain": ".cloudflareinsights.com", "path": "/"},
-                        ])
+                        ctx.add_cookies(cookies)
                     except Exception:
                         pass
-                page = ctx.new_page()
-                page.goto(url, timeout=timeout_seconds * 1000, wait_until="domcontentloaded")
-                _human_like_pause(page)
-                # Poll for challenges to clear (up to timeout_seconds).
-                # Two challenge types:
-                #  - Turnstile checkbox ("Verify you are human"): click once.
-                #  - "Just a moment..." automatic JS check: NOTHING to
-                #    click — wait for the title to become the real
-                #    listing (real Edge + human signals + time).
-                clicked = False
-                deadline = time.monotonic() + timeout_seconds
-                html = ""
-                title = ""
-                while True:
-                    html = page.content()
-                    title = _safe_title(page)
-                    if _page_looks_blocked(html) and not clicked:
-                        clicked = _try_turnstile_click(page, timeout_seconds)
-                        if clicked:
-                            continue  # re-read after the click
-                    if not _is_cloudflare_challenge_html(html, title) and not _page_looks_blocked(html):
-                        break
-                    if time.monotonic() >= deadline:
-                        break
-                    time.sleep(1.0)
-                if _is_cloudflare_challenge_html(html, title):
-                    try:
-                        anchor_count = len(page.content().split("<a")) - 1
-                    except Exception:
-                        anchor_count = -1
-                    raise _cloudflare_error(
-                        url, title=title,
-                        anchors=anchor_count, html_len=len(html),
-                    )
-                if _page_looks_blocked(html):
-                    raise JijiScrapeError(
-                        "Turnstile challenge did not clear "
-                        f"within {timeout_seconds}s for {_truncate_url(url)}. "
-                        "Solve in Edge, update CF_CLEARANCE in .env, retry."
-                    )
-                # Cards may render via JS after domcontentloaded — wait.
-                html = _wait_for_cards(page, html)
-                if _is_cloudflare_challenge_html(html, _safe_title(page)):
-                    raise _cloudflare_error(url, title=_safe_title(page), html_len=len(html))
-                if _page_looks_blocked(html):
-                    raise JijiScrapeError(
-                        f"Still blocked after browser fetch for {_truncate_url(url)} "
-                        "(Turnstile challenge still present). Solve in Edge, "
-                        "update CF_CLEARANCE in .env, retry."
-                    )
-                return html
-            finally:
+            else:
+                browser, channel_used, channels_tried = _launch_ephemeral_browser(p, dotenv_path)
+                ctx = _new_ephemeral_context(
+                    browser, mobile=mobile, with_cookie=with_cookie, dotenv_path=dotenv_path,
+                )
+                log.debug(
+                    "browser attempt: mobile=%s with_cookie=%s channel=%s",
+                    mobile, with_cookie, channel_used,
+                )
+            page = ctx.new_page()
+            page.goto(url, timeout=timeout_seconds * 1000, wait_until="domcontentloaded")
+            _human_like_pause(page)
+            clicked = False
+            deadline = time.monotonic() + timeout_seconds
+            html = ""
+            title = ""
+            while True:
+                html = page.content()
+                title = _safe_title(page)
+                if _page_looks_blocked(html) and not clicked:
+                    clicked = _try_turnstile_click(page, timeout_seconds)
+                    if clicked:
+                        continue  # re-read after the click
+                if not _is_cloudflare_challenge_html(html, title) and not _page_looks_blocked(html):
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(1.0)
+            if _is_cloudflare_challenge_html(html, title):
                 try:
-                    ctx.close()
+                    anchor_count = len(page.content().split("<a")) - 1
                 except Exception:
-                    pass
-    except JijiScrapeError:
-        raise
-    except Exception as exc:
-        # NEVER leak the cookie: the message contains only the URL + cause.
-        cause = str(exc)[:300]
-        raise JijiScrapeError(
-            f"Browser fetch failed for {_truncate_url(url)}: {cause}"
-        ) from exc
+                    anchor_count = -1
+                raise _cloudflare_error(
+                    url, title=title,
+                    anchors=anchor_count, html_len=len(html),
+                    channels_tried=channels_tried,
+                )
+            if _page_looks_blocked(html):
+                raise JijiScrapeError(
+                    "Turnstile challenge did not clear "
+                    f"within {timeout_seconds}s for {_truncate_url(url)}. "
+                    "Solve in Edge, update CF_CLEARANCE in .env, retry."
+                )
+            html = _wait_for_cards(page, html)
+            if _is_cloudflare_challenge_html(html, _safe_title(page)):
+                raise _cloudflare_error(url, title=_safe_title(page), html_len=len(html),
+                                        channels_tried=channels_tried)
+            if _page_looks_blocked(html):
+                raise JijiScrapeError(
+                    f"Still blocked after browser fetch for {_truncate_url(url)} "
+                    "(Turnstile challenge still present). Solve in Edge, "
+                    "update CF_CLEARANCE in .env, retry."
+                )
+            return html, channels_tried
+        except JijiScrapeError as _exc:
+            # Surface which channels actually ran, so the outer loop's
+            # final error can name them (never claim Edge ran when
+            # Chromium was the one that launched).
+            _exc._channels_tried = list(channels_tried)  # type: ignore[attr-defined]
+            raise
+        finally:
+            try:
+                if ctx is not None:
+                    ctx.close()
+            except Exception:
+                pass
+            try:
+                if browser is not None:
+                    browser.close()
+            except Exception:
+                pass
+
+
+def fetch_with_browser(
+    url: str,
+    *,
+    profile_dir: str | None = None,
+    data_dir: str = "./data",
+    timeout_seconds: int = 30,
+    dotenv_path: str | None = None,
+    _playwright_factory=None,
+) -> str:
+    """Fetch a URL with REAL Edge (fallback Chrome -> Chromium) + mobile.
+
+    Fallback chain (first-class, documented in README):
+      (1) requests + CF_CLEARANCE + Edge UA  [in scraper.fetch]
+      (2) Playwright real Edge + stealth + CF_CLEARANCE in context
+      (3) Playwright desktop Edge, no cookie (fresh session)
+      (4) Playwright mobile emulation (Pixel 7) + CF_CLEARANCE
+      (5) Playwright mobile emulation, no cookie
+      (6) clear human handoff error ("solve in Edge, update
+          CF_CLEARANCE in .env, retry") — never a fake result.
+
+    Max 4 browser attempts per URL, with pacing between attempts;
+    first success wins. Each attempt uses an EPHEMERAL context (no
+    profile dir, no SingletonLock) unless BROWSER_PERSISTENT_PROFILE=1.
+    Returns page HTML. Raises JijiScrapeError (from scraper) on any
+    failure. `_playwright_factory` exists for tests to inject a fake.
+    The CF_CLEARANCE / CF_BM values are NEVER logged and NEVER in errors.
+    """
+    from .scraper import JijiScrapeError
+
+    attempts = [
+        {"label": "desktop+cookie", "mobile": False, "with_cookie": True},
+        {"label": "desktop", "mobile": False, "with_cookie": False},
+        {"label": "mobile+cookie", "mobile": True, "with_cookie": True},
+        {"label": "mobile", "mobile": True, "with_cookie": False},
+    ]
+    channels_tried: list[str] = []
+    attempt_labels: list[str] = []
+    last_exc: Exception | None = None
+    for i, attempt in enumerate(attempts):
+        attempt_labels.append(attempt["label"])
+        try:
+            html, tried = _fetch_with_browser_once(
+                url,
+                mobile=attempt["mobile"],
+                with_cookie=attempt["with_cookie"],
+                timeout_seconds=timeout_seconds,
+                dotenv_path=dotenv_path,
+                profile_dir=profile_dir,
+                data_dir=data_dir,
+                _playwright_factory=_playwright_factory,
+            )
+            for ch in tried:
+                if ch not in channels_tried:
+                    channels_tried.append(ch)
+            return html
+        except JijiScrapeError as exc:
+            last_exc = exc
+            for ch in getattr(exc, "_channels_tried", []) or []:
+                if ch not in channels_tried:
+                    channels_tried.append(ch)
+            msg = str(exc).lower()
+            # Only Cloudflare/turnstile blocks merit the next attempt.
+            # Missing Playwright / launch errors on every channel are
+            # final — retrying them 4x would just repeat the same error.
+            if "cloudflare" not in msg and "just a moment" not in msg \
+                    and "turnstile" not in msg and "blocked" not in msg \
+                    and "challenge" not in msg:
+                raise
+            if i < len(attempts) - 1:
+                time.sleep(1.0)  # pacing between attempts, never hammering
+            continue
+        except Exception as exc:  # noqa: BLE001 - factory/launch failure
+            # NEVER leak cookies: only the URL + truncated cause.
+            raise JijiScrapeError(
+                f"Browser fetch failed for {_truncate_url(url)}: {str(exc)[:300]}"
+            ) from exc
+    # All attempts blocked: report WHAT was tried (channels + attempts).
+    raise JijiScrapeError(
+        "Browser fetch failed for " + _truncate_url(url) +
+        ": still blocked by Cloudflare 'Just a moment...' after "
+        + ", ".join(attempt_labels) +
+        (f" (channels tried: {', '.join(channels_tried)})" if channels_tried else "") +
+        ". Solve in Edge, update CF_CLEARANCE in .env, retry."
+    ) from last_exc
+
+
 
 
 async def fetch_with_browser_async(

@@ -99,13 +99,23 @@ def test_fetch_with_browser_async_no_sync_in_async_error():
         def close(self):
             return None
 
+    class _FakeBrowser:
+        def new_context(self, **kw):
+            return _FakeCtx()
+
+        def close(self):
+            return None
+
     class _FakeChromium:
-        def launch_persistent_context(self, **kw):
+        def launch(self, **kw):
             try:
                 _asyncio.get_running_loop()
             except RuntimeError:
-                return _FakeCtx()
+                return _FakeBrowser()
             raise RuntimeError("Sync API inside asyncio loop")
+
+        def launch_persistent_context(self, **kw):
+            raise AssertionError("ephemeral context must be used by default")
 
     class _FakePlaywright:
         def __enter__(self):

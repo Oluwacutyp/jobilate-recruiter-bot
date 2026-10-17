@@ -161,6 +161,8 @@ school mode is on). Send `/todo` any time to see it again. It shows:
 
 The bot uses real Microsoft Edge now (same browser you use) and
 clicks "Verify you're human" itself — you don't need to solve it.
+If desktop Edge is blocked, the bot also tries a mobile-like browser
+if that helps — you don't need to do anything.
 If it says "Jiji blocked, retrying later" or "Cloudflare 'Just a
 moment...' challenge", just wait. It retries by itself. You can also
 send `/scrape 1` to try again. `/config` tells you if the cookie is
